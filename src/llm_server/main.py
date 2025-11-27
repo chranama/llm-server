@@ -78,11 +78,12 @@ def create_app() -> FastAPI:
     metrics.setup(app)
 
     # --- Routers ---
-    from llm_server.api import health, generate, models
+    from llm_server.api import health, generate, models, admin
 
     app.include_router(health.router)
     app.include_router(generate.router)
     app.include_router(models.router)
+    app.include_router(admin.router)
 
     return app
 

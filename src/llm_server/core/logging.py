@@ -1,95 +1,180 @@
-# app/core/logging.py
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
 
-from fastapi import Request, Response
+from fastapi import FastAPI, Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
 
-# We DO NOT use "uvicorn.access" to avoid its strict tuple-based formatter.
-ACCESS_LOGGER_NAME = "llm.access"
-DEFAULT_FORMAT = "%(asctime)s %(levelname)s %(name)s - %(message)s"
+# -----------------------------
+# JSON log formatter
+# -----------------------------
 
-
-def _configure_logger() -> logging.Logger:
+class JsonFormatter(logging.Formatter):
     """
-    Create a dedicated, idempotent logger for access logs.
-    - Simple formatter (no tuple unpacking).
-    - Does not propagate to root to avoid double-logging.
+    Minimal JSON formatter.
+
+    Standard fields:
+      - ts, level, logger, message
+
+    Plus selected extras if present on the LogRecord:
+      - request_id, method, path, status_code, latency_ms, client_ip
+      - route, model_id, api_key_id, api_key_role
+      - error_type, error_message
     """
-    logger = logging.getLogger(ACCESS_LOGGER_NAME)
-    if not logger.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter(DEFAULT_FORMAT))
-        logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    return logger
+
+    _EXTRA_KEYS = [
+        "request_id",
+        "method",
+        "path",
+        "status_code",
+        "latency_ms",
+        "client_ip",
+        "route",
+        "model_id",
+        "api_key_id",
+        "api_key_role",
+        "error_type",
+        "error_message",
+        "cached", 
+    ]
+
+    def format(self, record: logging.LogRecord) -> str:
+        base: Dict[str, Any] = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname.lower(),
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+
+        for key in self._EXTRA_KEYS:
+            value = getattr(record, key, None)
+            if value is not None:
+                base[key] = value
+
+        # If there is exception info, include a short form
+        if record.exc_info:
+            base.setdefault("error_type", record.exc_info[0].__name__)
+            base.setdefault("error_message", str(record.exc_info[1]))
+
+        return json.dumps(base, default=str)
 
 
-access_logger = _configure_logger()
+# -----------------------------
+# Request logging middleware
+# -----------------------------
+
+access_logger = logging.getLogger("llm_server.access")
+error_logger = logging.getLogger("llm_server.error")
 
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """
-    Adds a request_id to request.state, logs start/end with method, path,
-    status_code, client, and latency, and sets X-Request-ID on the response.
+    Per-request logging + request_id propagation.
+
+    - Generates request_id and attaches to request.state.request_id
+    - Logs a structured "request" record on success
+    - Logs a structured "request_error" record on unhandled exceptions
+    - Adds X-Request-ID header to the response
     """
-    async def dispatch(self, request: Request, call_next):
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        start = time.time()
         request_id = str(uuid.uuid4())
         request.state.request_id = request_id
 
-        method = request.method
-        path = request.url.path
-        client: Optional[str] = request.client.host if request.client else None
-
-        access_logger.info(f"[{request_id}] started method={method} path={path} client={client}")
-        t0 = time.perf_counter()
-        status_code: Optional[int] = None
+        client_ip: Optional[str] = None
+        if request.client:
+            client_ip = request.client.host
 
         try:
-            response: Response = await call_next(request)
-            status_code = response.status_code
-            return response
+            response = await call_next(request)
         except Exception as exc:
-            # Log the exception and re-raise so default handlers still apply
-            access_logger.exception(f"[{request_id}] unhandled_exception path={path}: {exc}")
-            raise
-        finally:
-            elapsed_ms = (time.perf_counter() - t0) * 1000.0
-            # Try to set X-Request-ID if we have a response object
-            try:
-                # When an exception occurs before response creation, this may fail; ignore.
-                response.headers["X-Request-ID"] = request_id  # type: ignore[name-defined]
-            except Exception:
-                pass
+            latency_ms = (time.time() - start) * 1000.0
 
-            # Log completion line
-            if status_code is None:
-                # In case of exception before response is produced
-                access_logger.info(
-                    f"[{request_id}] finished method={method} path={path} status=ERROR "
-                    f"latency_ms={elapsed_ms:.2f} client={client}"
-                )
-            else:
-                content_length = None
-                try:
-                    content_length = response.headers.get("content-length")  # type: ignore[name-defined]
-                except Exception:
-                    pass
+            # Optionally also pull model_id / cached here if you want them on error logs
+            model_id = getattr(request.state, "model_id", None)
+            cached = getattr(request.state, "cached", None)
 
-                access_logger.info(
-                    f"[{request_id}] finished method={method} path={path} status={status_code} "
-                    f"latency_ms={elapsed_ms:.2f} client={client} content_length={content_length}"
-                )
+            error_logger.exception(
+                "request_error",
+                extra={
+                    "request_id": request_id,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "client_ip": client_ip,
+                    "latency_ms": latency_ms,
+                    "model_id": model_id,
+                    "cached": cached,
+                },
+            )
+            raise exc
+
+        latency_ms = (time.time() - start) * 1000.0
+
+        # Add X-Request-ID header for clients
+        response.headers["X-Request-ID"] = request_id
+
+        # Pull values set by handlers (e.g. /v1/generate)
+        model_id = getattr(request.state, "model_id", None)
+        cached = getattr(request.state, "cached", None)
+
+        extra: Dict[str, Any] = {
+            "request_id": request_id,
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": response.status_code,
+            "client_ip": client_ip,
+            "latency_ms": latency_ms,
+        }
+
+        if model_id is not None:
+            extra["model_id"] = model_id
+        if cached is not None:
+            extra["cached"] = cached
+
+        access_logger.info("request", extra=extra)
+
+        return response
 
 
-def setup(app):
+# -----------------------------
+# Setup
+# -----------------------------
+
+def _configure_root_logging() -> None:
     """
-    Attach the RequestLoggingMiddleware. Idempotent if called once at startup.
+    Configure root + uvicorn loggers to use JSON formatting.
+
+    Called once from main.create_app().
     """
+    handler = logging.StreamHandler()
+    handler.setFormatter(JsonFormatter())
+
+    # Root logger
+    root = logging.getLogger()
+    root.handlers = [handler]
+    root.setLevel(logging.INFO)
+
+    # Uvicorn loggers
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        logger = logging.getLogger(name)
+        logger.handlers = [handler]
+        logger.propagate = False
+        logger.setLevel(logging.INFO)
+
+
+def setup(app: FastAPI) -> None:
+    """
+    Called from main.create_app().
+
+    - Configures logging
+    - Adds RequestLoggingMiddleware
+    """
+    _configure_root_logging()
     app.add_middleware(RequestLoggingMiddleware)

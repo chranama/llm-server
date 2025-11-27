@@ -1,5 +1,5 @@
 # LLM Server  
-### A Production-Style API Gateway + Inference Runtime for Large Language Models
+### A Production-Style LLM API Gateway & Inference Runtime
 
 This project is a self-hosted, production-inspired **LLM serving platform** built with FastAPI, Hugging Face Transformers, and PyTorch.
 
@@ -37,6 +37,8 @@ It is designed to be a **portfolio-grade system-level project** demonstrating my
 - Docker + `uv` support
 - Test suite with Pytest
 - Configurable for CPU / Apple Silicon (MPS) / CUDA
+- Admin and Ops API
+- Token counting
 
 ---
 
@@ -68,6 +70,9 @@ models:
     type: remote
     base_url: http://phi-server:8000
 ~~~
+
+If `models.yaml` is not provided, the server runs in **single-model mode** using
+`MODEL_ID` from environment configuration.
 
 The API can select models dynamically:
 
@@ -330,28 +335,50 @@ Works with any compatible Hugging Face causal LM model, such as:
 
 ---
 
-### 3. Observability
+## Observability
 
 Built-in metrics include:
 
+**General**
 - Request counts (by route & status)
 - Latency histograms
 - Error counts
+
+**LLM-specific**
+- `llm_requests_total{route, model_id, cached}`
+- `llm_tokens_total{direction, model_id}`  
+- `llm_request_latency_ms{route, model_id}`
 
 Exposed via:
 
 - `/metrics` in Prometheus text format
 
-Designed to plug into:
+Designed to plug directly into:
 
 - Prometheus
-- Grafana dashboards
+- Grafana
 
 Logs include:
 
 - Method, path, status, latency
+- Model ID and cache hits
+- Token counts
 - Exception messages for unhandled errors
-- Per-request context (if configured)
+- Per-request context (`request_id`, `api_key`, `client_ip`, etc.)
+
+---
+
+## Admin & Ops APIs
+
+Administrative functionality is protected by admin-scoped API keys.
+
+- `GET /v1/me/usage` – shows aggregated usage for the active API key
+- `GET /v1/admin/keys` – list all API keys, roles, and timestamps
+- `POST /v1/admin/keys` – create new API keys and assign roles
+- `GET /v1/admin/logs` – query recent inference logs (paginated)
+
+These endpoints convert the server from a simple model wrapper into a multi-tenant,
+operator-friendly platform with real observability and governance.
 
 ---
 
