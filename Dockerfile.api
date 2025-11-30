@@ -24,4 +24,4 @@ EXPOSE 8000
 
 # Run the app
 # Assumes your main entrypoint is in src/llm_server/main.py
-CMD ["python", "-m", "llm_server.main"]
+CMD ["serve"]

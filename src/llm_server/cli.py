@@ -1,4 +1,4 @@
-# app/cli.py
+# src/llm_server/cli.py
 import os
 import uvicorn
 
