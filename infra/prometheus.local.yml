@@ -1,14 +1,14 @@
-# infra/prometheus.yml
+# infra/prometheus.local.yml
 global:
   scrape_interval: 5s
   evaluation_interval: 5s
 
 scrape_configs:
-  # Scrape the containerized API (CPU Llama 3.2)
-  - job_name: "llm_api_container"
+  # Scrape the API running on your Mac (MPS Llama 3.1)
+  - job_name: "llm_api_local"
     metrics_path: /metrics
     static_configs:
-      - targets: ["api:8000"]
+      - targets: ["host.docker.internal:8000"]
 
   # You can keep other scrape jobs here (Prometheus itself, etc.)
   - job_name: "prometheus"

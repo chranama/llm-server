@@ -1,0 +1,16 @@
+# docker-compose.local.yml
+services:
+  # Disable API container in local mode (we run API on host/MPS)
+  api:
+    deploy:
+      replicas: 0
+
+  # Override Nginx config for local API
+  nginx:
+    volumes:
+      - ./infra/nginx.local.conf:/etc/nginx/nginx.conf:ro
+
+  # Override Prometheus config for local API
+  prometheus:
+    volumes:
+      - ./infra/prometheus.local.yml:/etc/prometheus/prometheus.yml:ro

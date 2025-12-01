@@ -1,11 +1,4 @@
-# models.yaml
-
-# The default model the server will use when no `model` is specified
-default_model: mistralai/Mistral-7B-v0.1
-
-# List of all models that this server knows about.
-# The first entry should usually match `default_model`.
+# models.yaml (local dev)
+default_model: meta-llama/Llama-3.1-8B-Instruct
 models:
-  - id: mistralai/Mistral-7B-v0.1
-  - id: mistralai/Mistral-7B-Instruct-v0.3
-  # - id: your-org/your-remote-model
+  - id: meta-llama/Llama-3.1-8B-Instruct
