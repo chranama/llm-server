@@ -41,26 +41,27 @@ You can explore each section directly:
 ### **6. Multi-Model Infrastructure**  
 [`docs/05-multimodel.md`](docs/05-multimodel.md)
 
-### **7. Project Structure**  
-[`docs/06-project-structure.md`](docs/06-project-structure.md)
+### **7. API Stability and Versioning
+[`docs/06-api-versioning.md`](docs/06-api-versioning.md)
 
-### **8. Makefile Guide**  
-[`docs/07-makefile.md`](docs/07-makefile.md)
+### **8. Project Structure**  
+[`docs/07-project-structure.md`](docs/07-project-structure.md)
 
-### **9. Quickstart (Container Mode)**  
-[`docs/08-quickstart-container.md`](docs/08-quickstart-container.md)
+### **9. Makefile Guide**  
+[`docs/08-makefile.md`](docs/08-makefile.md)
 
-### **10. Quickstart (Local Mode)**  
-[`docs/09-quickstart-local.md`](docs/09-quickstart-local.md)
+### **10. Quickstart (Container Mode)**  
+[`docs/09-quickstart-container.md`](docs/09-quickstart-container.md)
 
-### **11. Admin & Operations Guide**  
-[`docs/10-admin-ops.md`](docs/10-admin-ops.md)
+### **11. Quickstart (Local Mode)**  
+[`docs/10-quickstart-local.md`](docs/10-quickstart-local.md)
 
-### **12. Testing Guide**  
-[`docs/11-testing.md`](docs/11-testing.md)
+### **12. Admin & Operations Guide**  
+[`docs/11-admin-ops.md`](docs/11-admin-ops.md)
 
-### **13. Notes & Additional Considerations**  
-[`docs/12-notes.md`](docs/12-notes.md)
+### **13. Testing Guide**  
+[`docs/12-testing.md`](docs/12-testing.md)
+
 
 ---
 
