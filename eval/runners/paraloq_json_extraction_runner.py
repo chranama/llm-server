@@ -8,14 +8,14 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from llm_server.eval.datasets.paraloq_json_extraction import iter_paraloq_json_extraction
-from llm_server.eval.metrics.json_schema_extraction_scoring import score_json_extraction
-from llm_server.eval.prompts.paraloq_json_extraction_prompt import (
+from eval.datasets.paraloq_json_extraction import iter_paraloq_json_extraction
+from eval.metrics.json_schema_extraction_scoring import score_json_extraction
+from eval.prompts.paraloq_json_extraction_prompt import (
     _JSON_BEGIN,
     _JSON_END,
     build_paraloq_json_extraction_prompt,
 )
-from llm_server.eval.runners.base import BaseEvalRunner
+from eval.runners.base import BaseEvalRunner
 
 
 def _extract_text_from_generate_response(payload: Any) -> str:

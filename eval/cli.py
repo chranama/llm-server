@@ -8,13 +8,13 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
-from llm_server.eval.runners.base import BaseEvalRunner, EvalConfig
+from eval.runners.base import BaseEvalRunner, EvalConfig
 
 # --- runners (current suite) ---
-from llm_server.eval.runners.extraction_runner import make_extraction_runner
-from llm_server.eval.runners.paraloq_json_extraction_runner import GenerateParaloqJsonExtractionRunner
-from llm_server.eval.runners.squad_v2_runner import GenerateSquadV2Runner
-from llm_server.eval.runners.docred_runner import GenerateDocREDRunner
+from eval.runners.extraction_runner import make_extraction_runner
+from eval.runners.paraloq_json_extraction_runner import GenerateParaloqJsonExtractionRunner
+from eval.runners.squad_v2_runner import GenerateSquadV2Runner
+from eval.runners.docred_runner import GenerateDocREDRunner
 
 
 def _utc_run_id() -> str:
@@ -145,7 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--outdir",
         type=str,
         default=None,
-        help="Override output directory (default: src/llm_server/eval/results/<task>/<run_id>/).",
+        help="Override output directory (default: results/<task>/<run_id>/).",
     )
 
     parser.add_argument(

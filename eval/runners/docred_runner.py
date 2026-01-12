@@ -7,14 +7,14 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from llm_server.eval.datasets.docred import iter_docred
-from llm_server.eval.metrics.docred_scoring import (
+from eval.datasets.docred import iter_docred
+from eval.metrics.docred_scoring import (
     aggregate_docred_scores,
     parse_predicted_maybe_json,
     score_docred_example,
 )
-from llm_server.eval.prompts.docred_prompt import build_docred_prompt
-from llm_server.eval.runners.base import BaseEvalRunner
+from eval.prompts.docred_prompt import build_docred_prompt
+from eval.runners.base import BaseEvalRunner
 
 
 class GenerateDocREDRunner(BaseEvalRunner):

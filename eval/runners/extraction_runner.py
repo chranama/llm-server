@@ -7,18 +7,18 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from llm_server.eval.client.http_client import ExtractErr, ExtractOk, HttpEvalClient
-from llm_server.eval.datasets.voxel51_scanned_receipts import (
+from eval.client.http_client import ExtractErr, ExtractOk, HttpEvalClient
+from eval.datasets.voxel51_scanned_receipts import (
     DEFAULT_SCHEMA_ID,
     iter_voxel51_scanned_receipts,
 )
-from llm_server.eval.metrics.extraction_scoring import (
+from eval.metrics.extraction_scoring import (
     ExtractAttempt,
     format_summary,
     score_document,
     summarize_extraction,
 )
-from llm_server.eval.runners.base import BaseEvalRunner, EvalConfig
+from eval.runners.base import BaseEvalRunner, EvalConfig
 
 
 def _utc_ts() -> str:
@@ -49,7 +49,7 @@ class ExtractionEvalRunner(BaseEvalRunner):
         *,
         schema_id: str = DEFAULT_SCHEMA_ID,
         split: str = "train",
-        outdir: str = "src/llm_server/eval/results/extraction_sroie",
+        outdir: str = "results/extraction_sroie",
     ) -> None:
         super().__init__(base_url=base_url, api_key=api_key, config=config)
         self.schema_id = schema_id

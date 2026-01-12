@@ -7,10 +7,10 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from llm_server.eval.datasets.squad_v2 import iter_squad_v2
-from llm_server.eval.metrics.squad_v2_scoring import score_squad_v2_example, summarize_squad_v2
-from llm_server.eval.prompts.squad_v2_prompt import NO_ANSWER_TOKEN, build_squad_v2_prompt
-from llm_server.eval.runners.base import BaseEvalRunner
+from eval.datasets.squad_v2 import iter_squad_v2
+from eval.metrics.squad_v2_scoring import score_squad_v2_example, summarize_squad_v2
+from eval.prompts.squad_v2_prompt import NO_ANSWER_TOKEN, build_squad_v2_prompt
+from eval.runners.base import BaseEvalRunner
 
 
 class GenerateSquadV2Runner(BaseEvalRunner):
