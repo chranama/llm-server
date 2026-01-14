@@ -74,7 +74,11 @@ export class ApiError extends Error {
     this.bodyJson = bodyJson;
   }
 
-  private static makeMessage(status: number, bodyText: string, bodyJson: any | null) {
+  private static makeMessage(
+    status: number,
+    bodyText: string,
+    bodyJson: any | null
+  ) {
     // If backend returns a structured error like:
     // { "code": "...", "message": "...", "extra": {...} }
     if (bodyJson && typeof bodyJson === "object") {
@@ -88,7 +92,47 @@ export class ApiError extends Error {
   }
 }
 
-const API_BASE = "/api";
+/**
+ * Runtime-configurable API base.
+ *
+ * Precedence:
+ *  1) setApiBaseUrl() called by UI bootstrap (recommended; from /config.json)
+ *  2) VITE_API_BASE_URL (dev fallback)
+ *  3) "/api" (reverse-proxy default)
+ *
+ * Notes:
+ *  - If you use nginx to proxy /api -> backend, leave it as "/api".
+ *  - If you want the UI to call the backend directly, set VITE_API_BASE_URL
+ *    or setApiBaseUrl("http://host:8000/api").
+ */
+let API_BASE: string =
+  (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() ||
+  "/api";
+
+/**
+ * If your backend is hosted at e.g. http://localhost:8000 (no /api),
+ * pass base like "http://localhost:8000" and we will normalize to
+ * "http://localhost:8000/api".
+ *
+ * If you pass "http://localhost:8000/api" we keep it as-is.
+ */
+export function setApiBaseUrl(base: string | undefined | null): void {
+  const s = (base ?? "").trim();
+  if (!s) return;
+
+  // Allow relative "/api" too.
+  if (s === "/api") {
+    API_BASE = "/api";
+    return;
+  }
+
+  // Remove trailing slash
+  const noTrail = s.endsWith("/") ? s.slice(0, -1) : s;
+
+  // If caller already includes /api, use it; else append /api.
+  API_BASE = noTrail.endsWith("/api") ? noTrail : `${noTrail}/api`;
+}
+
 const API_KEY = import.meta.env.VITE_API_KEY as string | undefined;
 
 // ---- Dev UX: warn loudly if missing ----
@@ -98,7 +142,9 @@ const API_KEY = import.meta.env.VITE_API_KEY as string | undefined;
 //
 if (!API_KEY) {
   // eslint-disable-next-line no-console
-  console.warn("VITE_API_KEY is not set. Requests will fail with 401 missing_api_key.");
+  console.warn(
+    "VITE_API_KEY is not set. Requests will fail with 401 missing_api_key."
+  );
 }
 
 function authHeaders(): HeadersInit {
@@ -145,7 +191,9 @@ async function requestJson<T>(path: string, init: RequestInit): Promise<T> {
 // -----------------------------
 // API functions
 // -----------------------------
-export async function callGenerate(body: GenerateRequestBody): Promise<GenerateResponseBody> {
+export async function callGenerate(
+  body: GenerateRequestBody
+): Promise<GenerateResponseBody> {
   return requestJson<GenerateResponseBody>("/v1/generate", {
     method: "POST",
     headers: {
@@ -156,7 +204,9 @@ export async function callGenerate(body: GenerateRequestBody): Promise<GenerateR
   });
 }
 
-export async function callExtract(body: ExtractRequestBody): Promise<ExtractResponseBody> {
+export async function callExtract(
+  body: ExtractRequestBody
+): Promise<ExtractResponseBody> {
   return requestJson<ExtractResponseBody>("/v1/extract", {
     method: "POST",
     headers: {

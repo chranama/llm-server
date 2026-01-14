@@ -38,11 +38,24 @@ class SchemaLoadError(RuntimeError):
 
 def _schemas_dir() -> Path:
     """
-    Locate the schemas directory relative to the installed package.
-    Layout:
-      src/llm_server/core/schema_registry.py
-      src/llm_server/schemas/*.json
+    Resolution order:
+      1. SCHEMAS_DIR env var
+      2. project root /schemas
+      3. package-bundled schemas
     """
+    import os
+
+    env_dir = os.getenv("SCHEMAS_DIR")
+    if env_dir:
+        return Path(env_dir)
+
+    # project root /schemas
+    root = Path(__file__).resolve().parents[3]
+    root_schemas = root / "schemas"
+    if root_schemas.exists():
+        return root_schemas
+
+    # fallback to package path
     return Path(__file__).resolve().parents[1] / "schemas"
 
 

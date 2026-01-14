@@ -1,0 +1,37 @@
+service:
+  base_url: "http://127.0.0.1:8000"
+  api_key_env: "EVAL_API_KEY"   # eval runner reads key from env var name
+
+run:
+  outdir_root: "results"
+  concurrency: 8
+  request_timeout_seconds: 60
+  retries: 2
+  seed: 13
+
+defaults:
+  model_id: "mistralai/Mistral-7B-v0.1"
+
+extraction:
+  # IDs correspond to your schema_id (filename stem)
+  schema_ids:
+    - "invoice_v1"
+    - "ticket_v1"
+    - "sroie_receipt_v1"
+
+  attempts_per_item: 3
+  max_repair_iters: 2
+
+datasets:
+  # Enable/disable runners without editing code
+  extraction_sroie:
+    enabled: true
+    max_items: 200
+  squad_v2:
+    enabled: true
+    max_items: 200
+
+gates:
+  # Optional pass/fail thresholds (used later)
+  schema_valid_rate_min: 0.95
+  field_stability_min: 0.90

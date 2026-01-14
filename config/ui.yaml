@@ -1,0 +1,20 @@
+api:
+  # UI talks to the API gateway / FastAPI service
+  base_url: "http://127.0.0.1:8000"
+  timeout_ms: 60000
+
+features:
+  schema_discovery: true
+  schema_inspector: true
+  json_diff: true
+  curl_generator: true
+
+defaults:
+  mode: "extract"            # "extract" | "generate"
+  schema_id: "invoice_v1"
+  model_id: "mistralai/Mistral-7B-v0.1"
+
+ui:
+  # Control UI limits/behaviors without code changes
+  max_payload_chars: 20000
+  pretty_print_json: true

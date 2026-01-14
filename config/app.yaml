@@ -1,0 +1,38 @@
+service:
+  name: "LLM Server"
+  version: "0.1.0"
+  debug: false
+  env: "dev"
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+
+api:
+  cors_allowed_origins:
+    - "*"
+
+model:
+  default_id: "mistralai/Mistral-7B-v0.1"
+  allowed_models: []
+  models_config_path: "config/models.yaml"
+  dtype: "float16"
+  device: null   # null | "cuda" | "mps" | "cpu"
+
+redis:
+  enabled: false
+
+http:
+  # optional; you can keep this env-only if you prefer
+  llm_service_url: "http://127.0.0.1:9001"
+  client_timeout_seconds: 60
+
+limits:
+  rate_limit_rpm:
+    admin: 0
+    default: 120
+    free: 30
+  quota_auto_reset_days: 30
+
+cache:
+  api_key_cache_ttl_seconds: 10
