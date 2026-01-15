@@ -43,6 +43,10 @@ weights/
 *.pth
 *.gguf
 
+# ---- Allow curated model tooling directory ----
+!tools/models/
+!tools/models/**
+
 # =========================
 # ML/Experiment Artifacts
 # =========================

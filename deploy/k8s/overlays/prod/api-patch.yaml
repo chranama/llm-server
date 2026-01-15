@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: llm
+spec:
+  replicas: 2
+  template:
+    spec:
+      containers:
+        - name: api
+          env:
+            - name: ENV
+              value: "prod"
+            - name: DEBUG
+              value: "false"
+            - name: MODEL_LOAD_MODE
+              value: "eager"
+            - name: REQUIRE_MODEL_READY
+              value: "1"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"

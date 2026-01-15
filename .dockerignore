@@ -70,6 +70,8 @@ cache
 **/.cache
 models
 weights
+!tools/models
+!tools/models/**
 
 # =========================
 # Eval artifacts

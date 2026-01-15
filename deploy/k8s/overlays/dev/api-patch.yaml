@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: llm
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+        - name: api
+          env:
+            - name: ENV
+              value: "dev"
+            - name: DEBUG
+              value: "true"
+            - name: MODEL_LOAD_MODE
+              value: "off"
+            - name: REQUIRE_MODEL_READY
+              value: "0"

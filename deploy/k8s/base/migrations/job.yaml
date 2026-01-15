@@ -1,0 +1,84 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-migrate
+  namespace: llm
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+
+  template:
+    metadata:
+      labels:
+        app: db-migrate
+    spec:
+      restartPolicy: Never
+
+      containers:
+        - name: migrate
+          image: llm-backend:dev
+          imagePullPolicy: IfNotPresent
+
+          env:
+            - name: ENV
+              value: "dev"
+
+            - name: APP_ROOT
+              value: "/app"
+
+            - name: APP_CONFIG_PATH
+              value: "/app/config/app.yaml"
+
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: llm-secrets
+                  key: DATABASE_URL
+
+            # Explicit safety: migrations should not require redis
+            - name: REDIS_ENABLED
+              value: "false"
+
+          volumeMounts:
+            - name: llm-config
+              mountPath: /app/config
+              readOnly: true
+
+          command:
+            - sh
+            - -lc
+            - |
+              set -euo pipefail
+
+              echo "Waiting for database readiness..."
+              for i in $(seq 1 60); do
+                python - <<'PY'
+import asyncio, os
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy import text
+
+async def main():
+    url = os.environ["DATABASE_URL"]
+    eng = create_async_engine(url)
+    try:
+        async with eng.begin() as conn:
+            await conn.execute(text("SELECT 1"))
+    finally:
+        await eng.dispose()
+
+asyncio.run(main())
+PY
+                echo "ok" && break || true
+                sleep 2
+              done
+
+              echo "Running alembic migrations..."
+              python -m alembic upgrade head
+
+      volumes:
+        - name: llm-config
+          configMap:
+            name: llm-config
+            items:
+              - key: app.yaml
+                path: app.yaml

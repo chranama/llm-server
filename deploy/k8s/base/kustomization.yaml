@@ -1,0 +1,18 @@
+resources:
+  - namespace.yaml
+
+  - configmap.yaml
+  - secret.yaml
+
+  - postgres/deployment.yaml
+  - postgres/service.yaml
+
+  - redis/deployment.yaml
+  - redis/service.yaml
+
+  - migrations/job.yaml
+
+  - api/deployment.yaml
+  - api/service.yaml
+
+  - ingress.yaml
