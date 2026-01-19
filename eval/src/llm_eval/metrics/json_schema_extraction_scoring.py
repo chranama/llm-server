@@ -1,4 +1,4 @@
-# src/llm_server/eval/metrics/json_schema_extraction_scoring.py
+# llm_eval/metrics/json_schema_extraction_scoring.py
 
 from typing import Dict, Any
 from jsonschema import Draft7Validator

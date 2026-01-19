@@ -1,10 +1,11 @@
-# src/llm_server/eval/metrics/extraction_scoring.py
+# llm_eval/metrics/extraction_scoring.py
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+from llm_eval.metrics.common import quantile
 
 # -------------------------
 # Types
@@ -217,8 +218,6 @@ def field_equal(
       - If False: if expected is non-empty, predicted must match it; None is incorrect.
     """
     if _is_empty(exp_val):
-        # If ground truth missing/empty, you can choose to ignore or treat as match
-        # For SROIE, expected fields are typically present; keep default as:
         return allow_none_match and _is_empty(pred_val)
 
     if _is_empty(pred_val):
@@ -246,9 +245,7 @@ class DocFieldScore:
     status_code: Optional[int]
     error_code: Optional[str]
     error_stage: Optional[str]
-    # field -> correctness (True/False/None if not scorable)
     field_correct: Dict[str, Optional[bool]]
-    # convenience
     required_all_correct: Optional[bool]
     required_present_non_null: Optional[bool]
 
@@ -270,7 +267,6 @@ def score_document(
     field_correct: Dict[str, Optional[bool]] = {}
 
     if not attempt.ok or attempt.predicted is None:
-        # no field scoring possible
         for f in fields:
             field_correct[f] = None
         return DocFieldScore(
@@ -305,19 +301,16 @@ def score_document(
                 allow_none_match=allow_none_match_when_expected_missing,
             )
 
-    # Required present rate: required keys exist and are non-null/non-empty
     required_present = True
     for rf in required_fields:
         if _is_empty(pred.get(rf)):
             required_present = False
             break
 
-    # Required correctness: all required fields (that are scorable) are True
     req_scores: List[bool] = []
     for rf in required_fields:
         v = field_correct.get(rf)
         if v is None:
-            # If expected missing and you ignored it, don't count it
             continue
         req_scores.append(bool(v))
 
@@ -353,23 +346,6 @@ def _percent(num: int, den: int) -> float:
     return 100.0 * (num / den)
 
 
-def _quantile(values: Sequence[float], q: float) -> Optional[float]:
-    if not values:
-        return None
-    if q <= 0:
-        return min(values)
-    if q >= 1:
-        return max(values)
-    xs = sorted(values)
-    # nearest-rank with interpolation
-    pos = (len(xs) - 1) * q
-    lo = int(math.floor(pos))
-    hi = int(math.ceil(pos))
-    if lo == hi:
-        return xs[lo]
-    return xs[lo] + (xs[hi] - xs[lo]) * (pos - lo)
-
-
 # -------------------------
 # Aggregate metrics
 # -------------------------
@@ -398,9 +374,9 @@ class ExtractionScoreSummary:
     error_stage_counts: Dict[str, int]
 
     # field scoring
-    field_exact_match_rate: Dict[str, float]  # per field
-    doc_required_exact_match_rate: Optional[float]  # doc-level: all required correct (among scorable docs)
-    required_present_rate: Optional[float]  # required fields non-null
+    field_exact_match_rate: Dict[str, float]
+    doc_required_exact_match_rate: Optional[float]
+    required_present_rate: Optional[float]
 
     # latency
     latency_p50_ms: Optional[float]
@@ -426,9 +402,9 @@ def summarize_extraction(
 
     # Latencies
     latencies = [float(a.latency_ms) for a in attempts if a.latency_ms is not None]
-    p50 = _quantile(latencies, 0.50)
-    p95 = _quantile(latencies, 0.95)
-    p99 = _quantile(latencies, 0.99)
+    p50 = quantile(latencies, 0.50)
+    p95 = quantile(latencies, 0.95)
+    p99 = quantile(latencies, 0.99)
 
     # Error counts
     error_code_counts: Dict[str, int] = {}
@@ -446,19 +422,9 @@ def summarize_extraction(
         if a.error_stage:
             error_stage_counts[a.error_stage] = error_stage_counts.get(a.error_stage, 0) + 1
 
-    # Repair success rate:
-    # In your current API, "repair_attempted" is returned on success.
-    # For failures, you'll only know repair_attempted if you capture it in the runner.
-    # We'll define:
-    #   - attempted repair = a.repair_attempted is True
-    #   - repair success = ok AND repair_attempted
     n_repair_attempted = sum(1 for a in attempts if a.repair_attempted)
     n_repair_success = sum(1 for a in attempts if a.ok and a.repair_attempted)
 
-    # How many were invalid initially? You can only know this if you record it explicitly.
-    # In your service, you *do* know internally, but you don't return it.
-    # Best-effort proxy:
-    #   invalid_initial = repair_success (because it had to be invalid first) + failures with stage parse/validate (if you capture)
     n_invalid_initial = n_repair_success + sum(
         1
         for a in attempts
@@ -467,7 +433,6 @@ def summarize_extraction(
 
     repair_success_rate = (n_repair_success / n_repair_attempted) if n_repair_attempted else 0.0
 
-    # Field scoring
     doc_scores = [
         score_document(
             a,
@@ -478,7 +443,6 @@ def summarize_extraction(
         for a in attempts
     ]
 
-    # Per-field exact match: among docs where field_correct is not None
     field_exact_match_rate: Dict[str, float] = {}
     for f in fields:
         den = 0
@@ -492,7 +456,6 @@ def summarize_extraction(
                 num += 1
         field_exact_match_rate[f] = _percent(num, den)
 
-    # Document-level required exact match (among docs where required_all_correct is not None)
     doc_req_den = 0
     doc_req_num = 0
     for ds in doc_scores:
@@ -503,7 +466,6 @@ def summarize_extraction(
             doc_req_num += 1
     doc_required_exact_match_rate = _percent(doc_req_num, doc_req_den) if doc_req_den else None
 
-    # Required present rate (only among ok docs)
     pres_den = 0
     pres_num = 0
     for ds in doc_scores:

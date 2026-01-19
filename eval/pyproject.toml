@@ -55,3 +55,8 @@ exclude = ["tests*"]
 
 [tool.setuptools.package-data]
 llm_eval = ["**/*.yaml", "**/*.json"]
+
+[tool.pytest.ini_options]
+addopts = "-q --cov=llm_eval --cov-report=term-missing"
+testpaths = ["tests"]
+asyncio_mode = "auto"

@@ -1,4 +1,4 @@
-# eval/cli.py
+# src/llm_eval/cli.py
 from __future__ import annotations
 
 import argparse
@@ -8,16 +8,14 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
-from eval.config import dig, get_api_key, load_eval_yaml
-from eval.runners.base import BaseEvalRunner, EvalConfig
+from llm_eval.config import dig, get_api_key, load_eval_yaml
+from llm_eval.runners.base import BaseEvalRunner, EvalConfig
 
 # --- runners (current suite) ---
-from eval.runners.docred_runner import GenerateDocREDRunner
-from eval.runners.extraction_runner import make_extraction_runner
-from eval.runners.paraloq_json_extraction_runner import (
-    GenerateParaloqJsonExtractionRunner,
-)
-from eval.runners.squad_v2_runner import GenerateSquadV2Runner
+from llm_eval.runners.docred_runner import GenerateDocREDRunner
+from llm_eval.runners.extraction_runner import make_extraction_runner
+from llm_eval.runners.paraloq_json_extraction_runner import GenerateParaloqJsonExtractionRunner
+from llm_eval.runners.squad_v2_runner import GenerateSquadV2Runner
 
 
 def _utc_run_id() -> str:
@@ -33,14 +31,15 @@ def _write_json(path: str, obj: Any) -> None:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
 
+def _write_text(path: str, text: str) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
 def _write_jsonl(path: str, rows: list[dict[str, Any]]) -> None:
     with open(path, "w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
-
-
-def _as_dict(x: Any) -> dict[str, Any]:
-    return x if isinstance(x, dict) else {"value": x}
 
 
 def _shorten(text: str, n: int) -> str:
@@ -50,23 +49,92 @@ def _shorten(text: str, n: int) -> str:
     return s[: n - 3] + "..."
 
 
-def _extract_results(summary: dict[str, Any]) -> list[dict[str, Any]]:
-    r = summary.get("results")
-    return r if isinstance(r, list) else []
-
-
 def _default_outdir(root: str, task: str, run_id: str) -> str:
-    # results/<task>/<run_id> (root defaults to "results")
     return os.path.join(root, task, run_id)
+
+
+def _coerce_nested_payload(
+    payload_any: Any,
+) -> tuple[dict[str, Any], list[dict[str, Any]], Optional[str], Optional[dict[str, Any]]]:
+    """
+    Required runner contract:
+
+      {
+        "summary": dict,
+        "results": list[dict],
+        "report_text": str | None,   # optional
+        "config": dict | None,       # optional
+      }
+
+    We fail fast if this shape is not respected.
+    """
+    if not isinstance(payload_any, dict):
+        raise TypeError(
+            f"Runner returned {type(payload_any).__name__}, expected dict with keys summary/results/..."
+        )
+
+    summary_any = payload_any.get("summary")
+    if not isinstance(summary_any, dict):
+        raise TypeError("Runner output must include key 'summary' with a dict value")
+
+    results_any = payload_any.get("results", [])
+    if results_any is None:
+        results_any = []
+    if not isinstance(results_any, list):
+        raise TypeError("Runner output 'results' must be a list (or omitted)")
+
+    # enforce list[dict] (softly: drop non-dicts rather than explode)
+    results: list[dict[str, Any]] = [r for r in results_any if isinstance(r, dict)]
+
+    report_text_any = payload_any.get("report_text")
+    report_text = report_text_any if isinstance(report_text_any, str) and report_text_any.strip() else None
+
+    cfg_any = payload_any.get("config")
+    returned_config = cfg_any if isinstance(cfg_any, dict) else None
+
+    summary: dict[str, Any] = dict(summary_any)
+    return summary, results, report_text, returned_config
+
+
+def _fallback_report_text(task: str, run_id: str, base_url: str, summary: dict[str, Any]) -> str:
+    lines: list[str] = []
+    lines.append(f"task={task}")
+    lines.append(f"run_id={run_id}")
+    lines.append(f"base_url={summary.get('base_url', base_url)}")
+
+    if summary.get("dataset"):
+        lines.append(f"dataset={summary.get('dataset')}")
+    if summary.get("split"):
+        lines.append(f"split={summary.get('split')}")
+    if summary.get("max_examples") is not None:
+        lines.append(f"max_examples={summary.get('max_examples')}")
+
+    for k in [
+        "schema_validity_rate",
+        "doc_required_exact_match_rate",
+        "required_present_rate",
+        "answerable_exact_match_rate",
+        "unanswerable_accuracy",
+        "combined_score",
+        "precision",
+        "recall",
+        "f1",
+    ]:
+        if k in summary:
+            lines.append(f"{k}={summary.get(k)}")
+
+    for k in ["latency_p50_ms", "latency_p95_ms", "latency_p99_ms"]:
+        if summary.get(k) is not None:
+            lines.append(f"{k}={summary.get(k)}")
+
+    return "\n".join(lines) + "\n"
 
 
 # Map task names to runner factory functions
 TASK_FACTORIES: dict[str, Callable[[str, str, Optional[EvalConfig]], BaseEvalRunner]] = {
-    # /v1/extract benchmark
     "extraction_sroie": lambda base_url, api_key, cfg: make_extraction_runner(
         base_url=base_url, api_key=api_key, config=cfg
     ),
-    # /v1/generate benchmarks (text-only)
     "generate_paraloq_json_extraction": lambda base_url, api_key, cfg: GenerateParaloqJsonExtractionRunner(
         base_url=base_url, api_key=api_key, config=cfg
     ),
@@ -107,31 +175,39 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--base-url",
         required=False,
-        help="Base URL of the llm-server API (e.g. http://localhost:8000). "
-        "If omitted, uses service.base_url from eval.yaml.",
+        help=(
+            "Base URL of the llm-server API (e.g. http://localhost:8000). "
+            "If omitted, uses service.base_url from eval.yaml."
+        ),
     )
 
     parser.add_argument(
         "--api-key",
         required=False,
-        help="API key used to call /v1/generate or /v1/extract. "
-        "If omitted, uses env var named by service.api_key_env in eval.yaml.",
+        help=(
+            "API key used to call /v1/generate or /v1/extract. "
+            "If omitted, uses env var named by service.api_key_env in eval.yaml."
+        ),
     )
 
     parser.add_argument(
         "--max-examples",
         type=int,
         default=None,
-        help="Maximum number of examples to evaluate (default: all available). "
-        "If omitted, may use datasets.<task>.max_items from eval.yaml.",
+        help=(
+            "Maximum number of examples to evaluate (default: all available). "
+            "If omitted, may use datasets.<task>.max_items from eval.yaml."
+        ),
     )
 
     parser.add_argument(
         "--model",
         type=str,
         default=None,
-        help="Optional model override identifier (if your server supports it). "
-        "If omitted, may use defaults.model_id from eval.yaml.",
+        help=(
+            "Optional model override identifier (if your server supports it). "
+            "If omitted, may use defaults.model_id from eval.yaml."
+        ),
     )
 
     # ---- debugging / output controls ----
@@ -149,7 +225,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--save",
         action="store_true",
-        help="Save summary.json and (if present) results.jsonl under results/<task>/<run_id>/ (default: on).",
+        help="Save summary.json and results.jsonl under results/<task>/<run_id>/ (default: on).",
     )
     parser.add_argument(
         "--no-save",
@@ -184,9 +260,9 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-async def amain() -> None:
+async def amain(argv: list[str] | None = None) -> None:
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     cfg_yaml = load_eval_yaml(args.config)
 
@@ -199,28 +275,19 @@ async def amain() -> None:
         parser.error("--task is required (or use --list-tasks).")
 
     if args.task not in TASK_FACTORIES:
-        parser.error(
-            f"Unknown task '{args.task}'. Valid options: {', '.join(sorted(TASK_FACTORIES.keys()))}"
-        )
+        parser.error(f"Unknown task '{args.task}'.")
 
-    # Optional: allow eval.yaml to disable tasks
     enabled = dig(cfg_yaml, "datasets", args.task, "enabled", default=True)
     if enabled is False:
-        parser.error(
-            f"Task '{args.task}' is disabled in eval.yaml (datasets.{args.task}.enabled=false)."
-        )
+        parser.error(f"Task '{args.task}' is disabled in eval.yaml (datasets.{args.task}.enabled=false).")
 
-    # Resolve base_url: CLI > YAML
     base_url = args.base_url or dig(cfg_yaml, "service", "base_url", default=None)
     if not base_url:
         parser.error("--base-url is required (or set service.base_url in eval.yaml).")
 
-    # Resolve api_key: CLI > env var specified in YAML
     api_key = args.api_key or get_api_key(cfg_yaml)
     if not api_key:
-        parser.error(
-            "--api-key is required (or set service.api_key_env in eval.yaml and export it)."
-        )
+        parser.error("--api-key is required (or set service.api_key_env in eval.yaml and export it).")
 
     # defaults: print + save ON unless explicitly disabled
     do_print = True
@@ -235,15 +302,12 @@ async def amain() -> None:
     if args.save:
         do_save = True
 
-    # Resolve max_examples: CLI > YAML datasets.<task>.max_items
     max_examples = args.max_examples
     if max_examples is None:
         max_examples = dig(cfg_yaml, "datasets", args.task, "max_items", default=None)
 
-    # Resolve model override: CLI > YAML defaults.model_id
     model_override = args.model or dig(cfg_yaml, "defaults", "model_id", default=None)
 
-    # Resolve outdir_root for default artifacts path
     outdir_root = dig(cfg_yaml, "run", "outdir_root", default="results")
     if not isinstance(outdir_root, str) or not outdir_root.strip():
         outdir_root = "results"
@@ -253,11 +317,8 @@ async def amain() -> None:
     runner_factory = TASK_FACTORIES[args.task]
     runner = runner_factory(base_url, api_key, cfg)
 
-    summary_any = await runner.run(
-        max_examples=max_examples,
-        model_override=model_override,
-    )
-    summary = _as_dict(summary_any)
+    payload_any = await runner.run(max_examples=max_examples, model_override=model_override)
+    summary, results, report_text, returned_config = _coerce_nested_payload(payload_any)
 
     # Ensure task + run_id present for consistent reporting
     task_name = str(summary.get("task") or args.task)
@@ -265,62 +326,30 @@ async def amain() -> None:
     summary["task"] = task_name
     summary["run_id"] = run_id
 
-    # Save artifacts
+    # Save artifacts (CLI owns persistence)
     outdir = args.outdir or _default_outdir(outdir_root, task_name, run_id)
 
     if do_save:
         _ensure_dir(outdir)
 
-        # Write summary.json
-        summary_path = os.path.join(outdir, "summary.json")
-        _write_json(summary_path, summary)
-
-        # Write results.jsonl if present
-        results = _extract_results(summary)
-        if results:
-            results_path = os.path.join(outdir, "results.jsonl")
-            _write_jsonl(results_path, results)
-
-        # Write a tiny report.txt for quick grepping
-        report_lines = []
-        report_lines.append(f"task={task_name}")
-        report_lines.append(f"run_id={run_id}")
-        report_lines.append(f"base_url={summary.get('base_url', base_url)}")
-        if summary.get("dataset"):
-            report_lines.append(f"dataset={summary.get('dataset')}")
-        if summary.get("split"):
-            report_lines.append(f"split={summary.get('split')}")
-        if summary.get("max_examples") is not None:
-            report_lines.append(f"max_examples={summary.get('max_examples')}")
-
-        # common score fields (if present)
-        for k in [
-            "schema_validity_rate",
-            "doc_required_exact_match_rate",
-            "required_present_rate",
-            "answerable_exact_match_rate",
-            "unanswerable_accuracy",
-            "combined_score",
-            "precision",
-            "recall",
-            "f1",
-        ]:
-            if k in summary:
-                report_lines.append(f"{k}={summary.get(k)}")
-
-        for k in ["latency_p50_ms", "latency_p95_ms", "latency_p99_ms"]:
-            if k in summary and summary.get(k) is not None:
-                report_lines.append(f"{k}={summary.get(k)}")
-
-        with open(os.path.join(outdir, "report.txt"), "w", encoding="utf-8") as f:
-            f.write("\n".join(report_lines) + "\n")
-
-        # surface where things went
+        # IMPORTANT: add run_dir BEFORE writing summary.json (tests assert it exists on disk)
         summary["run_dir"] = outdir
+
+        _write_json(os.path.join(outdir, "summary.json"), summary)
+
+        if results:
+            _write_jsonl(os.path.join(outdir, "results.jsonl"), results)
+
+        # report.txt: prefer runner-provided report_text, else CLI tiny report
+        if not report_text:
+            report_text = _fallback_report_text(task_name, run_id, base_url, summary)
+        _write_text(os.path.join(outdir, "report.txt"), report_text)
+
+        if isinstance(returned_config, dict):
+            _write_json(os.path.join(outdir, "config.json"), returned_config)
 
     # Optional debug print of first N results
     if args.debug_n and args.debug_n > 0:
-        results = _extract_results(summary)
         fields = None
         if args.debug_fields:
             fields = [x.strip() for x in args.debug_fields.split(",") if x.strip()]
@@ -328,10 +357,13 @@ async def amain() -> None:
         if not fields:
             fields = [
                 "id",
+                "doc_id",
                 "status_code",
+                "error_code",
                 "latency_ms",
                 "metrics",
                 "predicted",
+                "predicted_text",
                 "predicted_preview",
                 "error",
             ]
@@ -342,7 +374,7 @@ async def amain() -> None:
         for row in results[: args.debug_n]:
             if not isinstance(row, dict):
                 continue
-            compact = {}
+            compact: dict[str, Any] = {}
             for k in fields:
                 v = row.get(k)
                 if isinstance(v, str):
