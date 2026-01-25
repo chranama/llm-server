@@ -1,0 +1,20 @@
+# deploy/observability/prometheus/prometheus.host.yml
+#
+# Prometheus config for scraping a *host-run* API from inside Docker.
+# Works with the "obs-host" profile in the unified compose.
+#
+# Assumptions:
+# - Your host API exposes Prometheus metrics at GET /metrics on port 8000.
+# - The API is reachable from containers via host.docker.internal (Docker Desktop).
+
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: "llm-server-api-host"
+    metrics_path: /metrics
+    scheme: http
+    static_configs:
+      - targets:
+          - "host.docker.internal:8000"

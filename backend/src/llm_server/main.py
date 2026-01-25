@@ -1,3 +1,4 @@
+# backend/src/llm_server/main.py
 from __future__ import annotations
 
 import os
@@ -17,20 +18,11 @@ from llm_server.services.llm import build_llm_from_settings
 
 
 def _effective_model_load_mode(settings: Any) -> str:
-    """
-    Determine effective model load mode from Settings ONLY.
-
-    Values:
-      - "off"   : never build/load LLM in lifespan
-      - "lazy"  : build LLM object, but don't ensure_loaded at startup
-      - "eager" : build + ensure_loaded at startup
-      - "on"    : alias for "eager"
-    """
     raw = getattr(settings, "model_load_mode", None)
     if isinstance(raw, str) and raw.strip():
-        return raw.strip().lower()
+        m = raw.strip().lower()
+        return "eager" if m == "on" else m
 
-    # Derived default: prod => eager, else lazy
     env = str(getattr(settings, "env", "dev")).strip().lower()
     return "eager" if env == "prod" else "lazy"
 
@@ -120,7 +112,13 @@ async def lifespan(app: FastAPI):
                         try:
                             prompt = _warmup_prompt()
                             max_new = _warmup_max_new_tokens()
-                            _ = llm.generate(prompt=prompt, max_new_tokens=max_new, temperature=0.0)
+
+                            warm_backend = llm
+                            # If multi-model, warm the default backend object
+                            if hasattr(llm, "default") and callable(getattr(llm, "default")):
+                                warm_backend = llm.default()
+
+                            _ = warm_backend.generate(prompt=prompt, max_new_tokens=max_new, temperature=0.0)
                         except Exception as e:
                             app.state.model_loaded = False
                             app.state.model_error = f"warmup_failed: {repr(e)}"
@@ -180,10 +178,9 @@ def create_app() -> FastAPI:
     metrics.setup(app)
     errors.setup(app)
 
-    from llm_server.api import health, generate, models, admin, extract, capabilities
+    from llm_server.api import health, generate, models, admin, extract
 
     app.include_router(health.router)
-    app.include_router(capabilities.router)
     app.include_router(generate.router)
     app.include_router(models.router)
     app.include_router(admin.router)

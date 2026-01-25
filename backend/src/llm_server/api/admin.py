@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 from fastapi import APIRouter, Depends, Query, Request, status
 from pydantic import BaseModel, ConfigDict
@@ -12,13 +12,14 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
-from llm_server.api.deps import get_api_key
+from llm_server.api.deps import clear_models_config_cache, get_api_key
 from llm_server.core.config import get_settings
 from llm_server.core.errors import AppError
 from llm_server.db.models import ApiKey, InferenceLog, RoleTable
 from llm_server.db.session import get_session
 from llm_server.services.inference import set_request_meta
-from llm_server.services.llm import build_llm_from_settings, MultiModelManager
+from llm_server.services.llm import build_llm_from_settings
+from llm_server.services.llm_registry import MultiModelManager
 
 logger = logging.getLogger("llm_server.api.admin")
 
@@ -134,14 +135,54 @@ class AdminLoadModelResponse(BaseModel):
 # -------------------------------------------------------------------
 
 
+def _allowed_model_ids_from_settings(s) -> list[str]:
+    """
+    Back-compat: settings may expose allowed models as:
+      - allowed_models (preferred; set by llm_config.load_models_config)
+      - all_model_ids (legacy)
+    """
+    allowed = getattr(s, "allowed_models", None)
+    if isinstance(allowed, list) and allowed:
+        return [str(x) for x in allowed if str(x).strip()]
+    legacy = getattr(s, "all_model_ids", None) or []
+    return [str(x) for x in legacy if str(x).strip()]
+
+
+def _summarize_registry(llm_obj: Any, *, fallback_default: str) -> Tuple[str, list[str]]:
+    """
+    Return (default_model, model_ids) without requiring llm_obj to be an actual MultiModelManager.
+    Supports:
+      - MultiModelManager
+      - duck-typed registry objects with .models and .default_id
+      - single-model backends with .model_id
+    """
+    # 1) canonical registry
+    if isinstance(llm_obj, MultiModelManager):
+        return llm_obj.default_id, list(llm_obj.models.keys())
+
+    # 2) duck-typed registry (tests)
+    if hasattr(llm_obj, "models") and hasattr(llm_obj, "default_id"):
+        default_model = str(getattr(llm_obj, "default_id", "") or "") or fallback_default
+        try:
+            models_map = getattr(llm_obj, "models", {}) or {}
+            model_ids = list(models_map.keys()) if isinstance(models_map, dict) else []
+        except Exception:
+            model_ids = []
+        if not model_ids and default_model:
+            model_ids = [default_model]
+        return default_model, model_ids
+
+    # 3) single backend
+    default_model = str(getattr(llm_obj, "model_id", "") or "") or fallback_default
+    return default_model, [default_model] if default_model else []
+
+
 async def _ensure_admin(api_key: ApiKey, session: AsyncSession) -> None:
     """
     Reload the ApiKey with its Role in the current async session and
     enforce that the caller has the 'admin' role.
     """
-    result = await session.execute(
-        select(ApiKey).options(joinedload(ApiKey.role)).where(ApiKey.id == api_key.id)
-    )
+    result = await session.execute(select(ApiKey).options(joinedload(ApiKey.role)).where(ApiKey.id == api_key.id))
     db_key = result.scalar_one_or_none()
 
     role_name = db_key.role.name if db_key and db_key.role else None
@@ -182,13 +223,7 @@ async def get_my_usage(
         .where(InferenceLog.api_key == api_key.key)
     )
     res = await session.execute(stmt)
-    (
-        total_requests,
-        first_request_at,
-        last_request_at,
-        total_prompt_tokens,
-        total_completion_tokens,
-    ) = res.one()
+    (total_requests, first_request_at, last_request_at, total_prompt_tokens, total_completion_tokens) = res.one()
 
     return MeUsageResponse(
         api_key=api_key.key,
@@ -234,11 +269,7 @@ async def get_admin_usage(
     key_values = [r[0] for r in rows if r[0] is not None]
     key_map: dict[str, ApiKey] = {}
     if key_values:
-        keys_stmt = (
-            select(ApiKey)
-            .options(selectinload(ApiKey.role))
-            .where(ApiKey.key.in_(key_values))
-        )
+        keys_stmt = select(ApiKey).options(selectinload(ApiKey.role)).where(ApiKey.key.in_(key_values))
         key_objs = (await session.execute(keys_stmt)).scalars().all()
         key_map = {k.key: k for k in key_objs}
 
@@ -497,13 +528,7 @@ async def admin_load_model(
         model_error = getattr(app.state, "model_error", None)
 
         if existing is not None and model_loaded and not model_error:
-            if isinstance(existing, MultiModelManager):
-                model_ids = list(existing.models.keys())
-                default_model = existing.default_id
-            else:
-                default_model = getattr(existing, "model_id", s.model_id)
-                model_ids = [default_model]
-
+            default_model, model_ids = _summarize_registry(existing, fallback_default=cast(str, getattr(s, "model_id", "")))
             return AdminLoadModelResponse(
                 ok=True,
                 already_loaded=True,
@@ -513,16 +538,24 @@ async def admin_load_model(
 
         # Validate optional override (must be allowed by settings/models.yaml)
         if body.model_id:
-            if body.model_id not in s.all_model_ids:
+            allowed = _allowed_model_ids_from_settings(s)
+            if body.model_id not in allowed:
                 raise AppError(
                     code="model_not_allowed",
                     message=f"Model '{body.model_id}' not allowed.",
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    extra={"allowed": s.all_model_ids},
+                    extra={"allowed": allowed},
                 )
+
             # IMPORTANT: settings is cached. Mutating s here only affects this process
             # and is primarily for dev tooling.
             s.model_id = body.model_id  # type: ignore[attr-defined]
+
+            # If models config is cached, clear it so downstream sees the new default.
+            try:
+                clear_models_config_cache()
+            except Exception:
+                pass
 
         # Reset authoritative flags before attempting
         app.state.model_error = None
@@ -548,14 +581,9 @@ async def admin_load_model(
             app.state.llm = None
             raise
 
-        # Report models
+        # Report models (supports duck-typed registries too)
         llm = app.state.llm
-        if isinstance(llm, MultiModelManager):
-            model_ids = list(llm.models.keys())
-            default_model = llm.default_id
-        else:
-            default_model = getattr(llm, "model_id", get_settings().model_id)
-            model_ids = [default_model]
+        default_model, model_ids = _summarize_registry(llm, fallback_default=cast(str, getattr(get_settings(), "model_id", "")))
 
         return AdminLoadModelResponse(
             ok=True,

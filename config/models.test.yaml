@@ -1,0 +1,20 @@
+default_model: fake
+
+defaults:
+  backend: local
+  load_mode: lazy
+  device: auto
+  trust_remote_code: false
+  quantization: null
+  capabilities:
+    generate: true
+    extract: true
+
+models:
+  - id: fake
+    backend: local
+    load_mode: lazy
+    capabilities:
+      generate: true
+      extract: true
+    notes: "Fake model for integration tests"

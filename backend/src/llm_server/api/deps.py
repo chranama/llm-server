@@ -1,22 +1,41 @@
+# backend/src/llm_server/api/deps.py
 from __future__ import annotations
 
+import hashlib
+import json
 import time
-from typing import Any, Dict, Optional, Tuple
+from functools import lru_cache
+from typing import Any, Dict, Literal, Optional, Tuple, cast
 
 from fastapi import Depends, Header, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_server.core.errors import AppError
 from llm_server.core.config import get_settings
+from llm_server.core.errors import AppError
 from llm_server.db.models import ApiKey
 from llm_server.db.session import get_session
 from llm_server.services.llm import build_llm_from_settings
+from llm_server.services.llm_config import load_models_config
+from llm_server.services.llm_registry import MultiModelManager
+
+# -----------------------------------------------------------------------------
+# Types / constants
+# -----------------------------------------------------------------------------
+
+Capability = Literal["generate", "extract"]
+_CAP_KEYS: tuple[Capability, ...] = ("generate", "extract")
 
 # -----------------------------------------------------------------------------
 # Simple in-memory rate limiting state
 # -----------------------------------------------------------------------------
+# bucket -> (window_start_ts, count)
 _RL: Dict[str, Tuple[float, int]] = {}
+
+
+def clear_rate_limit_state() -> None:
+    """Test helper: clear in-memory rate limit buckets."""
+    _RL.clear()
 
 
 def _now() -> float:
@@ -24,6 +43,7 @@ def _now() -> float:
 
 
 def _role_rpm(role_obj: Any) -> int:
+    # TODO: wire real role-based RPM when roles are implemented
     return 60
 
 
@@ -39,6 +59,7 @@ def _check_rate_limit(key: str, role_obj: Any) -> None:
     bucket = f"{key}:{id(_role_rpm)}"
     window_start, count = _RL.get(bucket, (now, 0))
 
+    # Reset each minute
     if now - window_start >= window:
         window_start = now
         count = 0
@@ -115,28 +136,68 @@ async def get_api_key(
     return api_key_obj
 
 
+# -----------------------------------------------------------------------------
+# Settings snapshot helpers (prefer app.state.settings)
+# -----------------------------------------------------------------------------
+
+def settings_from_request(request: Request | None) -> Any:
+    if request is not None:
+        s = getattr(request.app.state, "settings", None)
+        if s is not None:
+            return s
+    return get_settings()
+
+
+# -----------------------------------------------------------------------------
+# LLM dependency
+# -----------------------------------------------------------------------------
+
 def _effective_model_load_mode_from_request(request: Request) -> str:
     """
     Single source of truth for model mode:
       1) app.state.model_load_mode (set in lifespan)
       2) app.state.settings / get_settings()
+      3) derived default from env (prod=>eager else lazy)
+
+    Normalizes "on" -> "eager".
     """
     mode = getattr(request.app.state, "model_load_mode", None)
     if isinstance(mode, str) and mode.strip():
-        return mode.strip().lower()
+        m = mode.strip().lower()
+        return "eager" if m == "on" else m
 
-    s = getattr(request.app.state, "settings", None) or get_settings()
+    s = settings_from_request(request)
 
     raw = getattr(s, "model_load_mode", None)
     if isinstance(raw, str) and raw.strip():
-        return raw.strip().lower()
+        m = raw.strip().lower()
+        return "eager" if m == "on" else m
 
     env = str(getattr(s, "env", "dev")).strip().lower()
     return "eager" if env == "prod" else "lazy"
 
 
 def get_llm(request: Request) -> Any:
+    """
+    Retrieve the app's LLM object without triggering weight-loading here.
+
+    Policy:
+      - model_load_mode == "off": do NOT build on request; require admin/manual load.
+      - model_error present: surface 503 instead of silently rebuilding.
+      - otherwise: ensure an LLM object exists in app.state (construction only).
+    """
     mode = _effective_model_load_mode_from_request(request)
+
+    # If startup recorded an error, do not silently rebuild a new LLM object.
+    model_error = getattr(request.app.state, "model_error", None)
+    if model_error:
+        raise AppError(
+            code="llm_unavailable",
+            message="LLM is unavailable due to startup/model error",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            extra={"model_error": model_error, "model_load_mode": mode},
+        )
+
     llm = getattr(request.app.state, "llm", None)
 
     # "off" means: do not build lazily on request
@@ -149,9 +210,316 @@ def get_llm(request: Request) -> Any:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
 
-    # lazy/eager/on: ensure llm object exists (loading semantics handled elsewhere)
+    # lazy/eager: ensure llm object exists (loading semantics handled elsewhere)
     if llm is None:
         llm = build_llm_from_settings()
         request.app.state.llm = llm
 
     return llm
+
+
+# -----------------------------------------------------------------------------
+# Capability enforcement (deployment + per-model)
+# -----------------------------------------------------------------------------
+
+def deployment_capabilities(request: Request | None = None) -> Dict[str, bool]:
+    """
+    Deployment-wide capability switches (Settings).
+    """
+    s = settings_from_request(request)
+    return {
+        "generate": bool(getattr(s, "enable_generate", True)),
+        "extract": bool(getattr(s, "enable_extract", True)),
+    }
+
+
+@lru_cache(maxsize=1)
+def _cached_models_config():
+    # Disk parse cached; tests can call clear_models_config_cache()
+    return load_models_config()
+
+
+def clear_models_config_cache() -> None:
+    _cached_models_config.cache_clear()
+
+
+def _model_capabilities_from_models_yaml(model_id: str) -> Optional[Dict[str, bool]]:
+    """
+    Per-model capabilities from models.yaml normalization:
+      - defaults.capabilities (if present)
+      - overridden by model_spec.capabilities (if present)
+
+    Returns None if models.yaml specifies no capabilities at all.
+    """
+    cfg = _cached_models_config()
+
+    defaults_caps = cfg.defaults.get("capabilities")
+    defaults_caps = cast(Optional[Dict[str, bool]], defaults_caps) if isinstance(defaults_caps, dict) else None
+
+    spec_caps: Optional[Dict[str, bool]] = None
+    for sp in cfg.models:
+        if sp.id == model_id:
+            if isinstance(sp.capabilities, dict):
+                spec_caps = dict(sp.capabilities)
+            break
+
+    if defaults_caps is None and spec_caps is None:
+        return None
+
+    out: Dict[str, bool] = {}
+    if defaults_caps:
+        for k in _CAP_KEYS:
+            if k in defaults_caps:
+                out[k] = bool(defaults_caps[k])
+    if spec_caps:
+        for k in _CAP_KEYS:
+            if k in spec_caps:
+                out[k] = bool(spec_caps[k])
+
+    # Note: may be partial; missing keys default to True when enforced.
+    return out
+
+
+def model_capabilities(model_id: str, *, request: Request | None = None) -> Optional[Dict[str, bool]]:
+    """
+    Return per-model capabilities.
+
+    Priority:
+      1) If MultiModelManager exists in app.state.llm -> use registry meta (runtime truth).
+      2) Else fall back to models.yaml (cached).
+
+    NOTE: This reads llm._meta as a lightweight runtime source. If you later add a public
+    llm.model_capabilities() API, swap it here.
+    """
+    if request is not None:
+        llm = getattr(request.app.state, "llm", None)
+        if isinstance(llm, MultiModelManager):
+            caps_meta = llm._meta.get(model_id, {}).get("capabilities", None)  # intentionally lightweight
+            if caps_meta is None:
+                return None
+
+            if isinstance(caps_meta, dict):
+                # Normalize only known keys; keep partial semantics
+                out: Dict[str, bool] = {}
+                for k in _CAP_KEYS:
+                    if k in caps_meta:
+                        out[k] = bool(caps_meta.get(k))
+                return out or None
+
+            # list/tuple/set form: treat as allow-list
+            if isinstance(caps_meta, (list, tuple, set)):
+                allowed = {str(x).strip().lower() for x in caps_meta if isinstance(x, str) and str(x).strip()}
+                return {k: (k in allowed) for k in _CAP_KEYS}
+
+            # unknown type => treat as unspecified
+            return None
+
+    return _model_capabilities_from_models_yaml(model_id)
+
+
+def effective_capabilities(
+    model_id: str,
+    *,
+    request: Request | None = None,
+) -> Dict[str, bool]:
+    """
+    Effective capabilities = (per-model caps defaulting to True/True if unspecified)
+    AND deployment-wide gates from Settings.
+    """
+    raw = model_capabilities(model_id, request=request)
+    if raw is None:
+        raw = {"generate": True, "extract": True}
+
+    for k in _CAP_KEYS:
+        raw.setdefault(k, True)
+
+    dep = deployment_capabilities(request)
+    return {k: bool(raw[k]) and bool(dep.get(k, True)) for k in _CAP_KEYS}
+
+
+def require_capability(
+    model_id: str,
+    capability: Capability,
+    *,
+    request: Request | None = None,
+) -> None:
+    """
+    Enforce that:
+      1) deployment allows the capability, AND
+      2) the chosen model is capable (per registry meta or models.yaml)
+
+    Raises:
+      - 501 capability_disabled (deployment off)
+      - 400 capability_not_supported (model lacks)
+    """
+    dep = deployment_capabilities(request)
+    if not bool(dep.get(capability, True)):
+        raise AppError(
+            code="capability_disabled",
+            message=f"{capability} is disabled in this deployment mode.",
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            extra={"capability": capability},
+        )
+
+    caps = model_capabilities(model_id, request=request)
+    if caps is None:
+        return
+
+    supported = bool(caps.get(capability, True))
+    if not supported:
+        raise AppError(
+            code="capability_not_supported",
+            message=f"Model '{model_id}' does not support capability '{capability}'.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            extra={"model_id": model_id, "capability": capability, "model_capabilities": caps},
+        )
+
+
+# -----------------------------------------------------------------------------
+# Shared model routing + request fingerprint helpers
+# -----------------------------------------------------------------------------
+
+def allowed_model_ids(*, request: Request | None = None) -> list[str]:
+    """
+    Back-compat: settings may expose allowed models as:
+      - allowed_models (preferred; set by llm_config.load_models_config)
+      - all_model_ids (legacy)
+    """
+    s = settings_from_request(request)
+    allowed = getattr(s, "allowed_models", None)
+    if isinstance(allowed, list) and allowed:
+        return [str(x) for x in allowed if str(x).strip()]
+    legacy = getattr(s, "all_model_ids", None) or []
+    return [str(x) for x in legacy if str(x).strip()]
+
+
+def default_model_id_from_settings(*, request: Request | None = None) -> str:
+    s = settings_from_request(request)
+    mid = getattr(s, "model_id", None)
+    if not isinstance(mid, str) or not mid.strip():
+        return ""
+    return mid.strip()
+
+
+def resolve_model(
+    llm: Any,
+    model_override: str | None,
+    *,
+    capability: Capability | None = None,
+    request: Request | None = None,
+) -> tuple[str, Any]:
+    """
+    Resolve a concrete (model_id, model_backend) pair.
+
+    - MultiModelManager:
+        - override wins if exists
+        - else:
+            - if capability provided and registry supports default_for_capability -> use it
+            - else use default_id
+    - dict registry (legacy):
+        - override wins if allowed + present
+        - else default from settings (or first key)
+    - single backend:
+        - override validated against allowed list (if present)
+        - else settings.model_id
+
+    NOTE: This function does NOT call require_capability(). Endpoints do that explicitly.
+    """
+    allowed = allowed_model_ids(request=request)
+
+    # --- Multi-model registry ---
+    if isinstance(llm, MultiModelManager):
+        if model_override is not None:
+            model_id = model_override
+            if model_id not in llm:
+                raise AppError(
+                    code="model_missing",
+                    message=f"Model '{model_id}' not found in LLM registry",
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    extra={"available": llm.list_models(), "default_id": llm.default_id},
+                )
+        else:
+            model_id = llm.default_id
+            if capability:
+                fn = getattr(llm, "default_for_capability", None)
+                if callable(fn):
+                    try:
+                        model_id = str(fn(capability))
+                    except Exception:
+                        model_id = llm.default_id
+
+        # Optional: keep "allowed list" enforcement (useful if you gate beyond registry)
+        if allowed and model_id not in allowed:
+            raise AppError(
+                code="model_not_allowed",
+                message=f"Model '{model_id}' not allowed.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+                extra={"allowed": allowed},
+            )
+
+        return model_id, llm[model_id]
+
+    # --- Dict registry (legacy) ---
+    if isinstance(llm, dict):
+        model_id = model_override or default_model_id_from_settings(request=request) or next(iter(llm.keys()), "")
+        if not model_id:
+            raise AppError(
+                code="model_config_invalid",
+                message="No model configured",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        if model_override is not None and allowed and model_id not in allowed:
+            raise AppError(
+                code="model_not_allowed",
+                message=f"Model '{model_id}' not allowed.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+                extra={"allowed": allowed},
+            )
+
+        if model_id not in llm:
+            raise AppError(
+                code="model_missing",
+                message=f"Model '{model_id}' not found in LLM registry",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return model_id, llm[model_id]
+
+    # --- Single backend ---
+    model_id = model_override or default_model_id_from_settings(request=request)
+    if model_override is not None and allowed and model_id not in allowed:
+        raise AppError(
+            code="model_not_allowed",
+            message=f"Model '{model_id}' not allowed.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            extra={"allowed": allowed},
+        )
+
+    return model_id or "default", llm
+
+
+def sha32(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
+
+
+def sha32_json(params: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(params, sort_keys=True).encode("utf-8")).hexdigest()[:32]
+
+
+def make_cache_redis_key(model_id: str, prompt_hash: str, params_fp: str) -> str:
+    # Used by /generate cache
+    return f"llm:cache:{model_id}:{prompt_hash}:{params_fp}"
+
+
+def make_extract_redis_key(model_id: str, prompt_hash: str, params_fp: str) -> str:
+    # Used by /extract cache
+    return f"llm:extract:{model_id}:{prompt_hash}:{params_fp}"
+
+
+def fingerprint_pydantic(body: Any, *, exclude: set[str], exclude_none: bool = True) -> str:
+    """
+    Stable param fingerprint from a pydantic model: sha over JSON of selected fields.
+    """
+    params = body.model_dump(exclude=exclude, exclude_none=exclude_none)
+    return sha32_json(params)

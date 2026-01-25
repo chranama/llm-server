@@ -1,25 +1,32 @@
 # config/models.yaml
 default_model: mistralai/Ministral-3-14B-Instruct-2512-BF16
 
-models:
+defaults:
+  backend: local
+  load_mode: lazy
+  device: auto
+  trust_remote_code: false
+  quantization: null
+  # llm_config.py expects capabilities as a mapping of booleans (not a list)
+  capabilities:
+    generate: true
+    extract: false
 
-  # -------------------------
-  # Primary production model
-  # -------------------------
+models:
   - id: mistralai/Ministral-3-14B-Instruct-2512-BF16
-    backend: local        # local | remote
-    load_mode: eager      # eager | lazy | off
+    backend: local
+    load_mode: eager
     dtype: bfloat16
-    device: auto          # auto | cuda | mps | cpu
+    device: auto
     text_only: false
     max_context: 32768
     trust_remote_code: true
-    quantization: null    # e.g. int8, int4, nf4 later
+    quantization: null
+    capabilities:
+      generate: true
+      extract: true
     notes: "Primary high-quality instruct model"
 
-  # -------------------------
-  # Peer 14B text-only model
-  # -------------------------
   - id: Qwen/Qwen2.5-14B-Instruct
     backend: local
     load_mode: lazy
@@ -29,11 +36,11 @@ models:
     max_context: 32768
     trust_remote_code: false
     quantization: null
+    capabilities:
+      generate: true
+      extract: false
     notes: "Peer 14B text-only instruct model"
 
-  # -------------------------
-  # Smaller text-only models
-  # -------------------------
   - id: mistralai/Mistral-7B-Instruct-v0.3
     backend: local
     load_mode: lazy
@@ -43,6 +50,9 @@ models:
     max_context: 8192
     trust_remote_code: false
     quantization: null
+    capabilities:
+      generate: true
+      extract: false
     notes: "Lightweight Mistral 7B instruct"
 
   - id: Qwen/Qwen2.5-7B-Instruct
@@ -54,4 +64,7 @@ models:
     max_context: 8192
     trust_remote_code: false
     quantization: null
+    capabilities:
+      generate: true
+      extract: false
     notes: "Lightweight Qwen 7B instruct"

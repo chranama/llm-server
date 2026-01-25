@@ -59,12 +59,31 @@ export interface SchemaIndexItem {
 export type JsonSchema = Record<string, any>;
 
 // -----------------------------
-// Types: /v1/capabilities
+// Types: /v1/models (replaces /v1/capabilities)
 // -----------------------------
+export interface ModelInfo {
+  id: string;
+  default: boolean;
+  backend?: string | null;
+  capabilities?: Record<string, boolean> | null;
+  load_mode?: string | null;
+  loaded?: boolean | null;
+}
+
+export interface ModelsResponseBody {
+  default_model: string;
+  models: ModelInfo[];
+  deployment_capabilities: {
+    generate: boolean;
+    extract: boolean;
+  };
+}
+
+// Keep this name so callers don’t have to change imports/usages.
+// Now sourced from /v1/models.deployment_capabilities.
 export interface CapabilitiesResponseBody {
   generate: boolean;
   extract: boolean;
-  mode?: string; // e.g. "generate-only" (optional; backend may include)
 }
 
 // -----------------------------
@@ -83,31 +102,41 @@ export class ApiError extends Error {
     this.bodyJson = bodyJson;
   }
 
-  private static makeMessage(
-    status: number,
-    bodyText: string,
-    bodyJson: any | null
-  ) {
-    // Supports both:
-    //  (old) { code, message, extra }
-    //  (new) { error: { code, message, ... }, request_id }
+  private static makeMessage(status: number, bodyText: string, bodyJson: any | null) {
+    // Backend canonical shape:
+    //   { code, message, extra?, request_id? }
+    // Also tolerate:
+    //   { error: { code, message, ... }, request_id }   (older)
+    //   { detail: ... }                                (FastAPI default)
     if (bodyJson && typeof bodyJson === "object") {
       const errObj =
         bodyJson.error && typeof bodyJson.error === "object"
           ? bodyJson.error
           : bodyJson;
 
-      const code = errObj.code ? String(errObj.code) : null;
-      const msg = errObj.message ? String(errObj.message) : null;
+      // Try common places for code/message
+      const code =
+        errObj.code != null
+          ? String(errObj.code)
+          : bodyJson.code != null
+          ? String(bodyJson.code)
+          : null;
 
-      // Optional: include request_id when available (handy for debugging)
-      const rid =
-        bodyJson.request_id != null ? String(bodyJson.request_id) : null;
+      const msg =
+        errObj.message != null
+          ? String(errObj.message)
+          : errObj.detail != null
+          ? typeof errObj.detail === "string"
+            ? errObj.detail
+            : JSON.stringify(errObj.detail)
+          : bodyJson.message != null
+          ? String(bodyJson.message)
+          : null;
+
+      const rid = bodyJson.request_id != null ? String(bodyJson.request_id) : null;
 
       if (code || msg) {
-        const base = `HTTP ${status}: ${code ?? "error"}${
-          msg ? ` — ${msg}` : ""
-        }`;
+        const base = `HTTP ${status}: ${code ?? "error"}${msg ? ` — ${msg}` : ""}`;
         return rid ? `${base} (request_id=${rid})` : base;
       }
     }
@@ -123,15 +152,8 @@ export class ApiError extends Error {
  *  1) setApiBaseUrl() called by UI bootstrap (recommended; from /config.json)
  *  2) VITE_API_BASE_URL (dev fallback)
  *  3) "/api" (reverse-proxy default)
- *
- * Notes:
- *  - If you use nginx to proxy /api -> backend, leave it as "/api".
- *  - If you want the UI to call the backend directly, set VITE_API_BASE_URL
- *    or setApiBaseUrl("http://host:8000/api").
  */
-let API_BASE: string =
-  (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() ||
-  "/api";
+let API_BASE: string = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() || "/api";
 
 /**
  * If your backend is hosted at e.g. http://localhost:8000 (no /api),
@@ -160,19 +182,13 @@ export function setApiBaseUrl(base: string | undefined | null): void {
 const API_KEY = import.meta.env.VITE_API_KEY as string | undefined;
 
 // ---- Dev UX: warn loudly if missing ----
-//
-// If you'd rather hard-fail instead of warn, replace with:
-//   if (!API_KEY) throw new Error("VITE_API_KEY is not set ...");
-//
 if (!API_KEY) {
   // eslint-disable-next-line no-console
-  console.warn(
-    "VITE_API_KEY is not set. Requests will fail with 401 missing_api_key."
-  );
+  console.warn("VITE_API_KEY is not set. Requests will fail with 401 missing_api_key.");
 }
 
 function authHeaders(): HeadersInit {
-  // Backend expects X-API-Key per src/llm_server/api/deps.py
+  // Backend expects X-API-Key per backend/src/llm_server/api/deps.py
   return API_KEY ? { "X-API-Key": API_KEY } : {};
 }
 
@@ -215,9 +231,7 @@ async function requestJson<T>(path: string, init: RequestInit): Promise<T> {
 // -----------------------------
 // API functions
 // -----------------------------
-export async function callGenerate(
-  body: GenerateRequestBody
-): Promise<GenerateResponseBody> {
+export async function callGenerate(body: GenerateRequestBody): Promise<GenerateResponseBody> {
   return requestJson<GenerateResponseBody>("/v1/generate", {
     method: "POST",
     headers: {
@@ -228,9 +242,7 @@ export async function callGenerate(
   });
 }
 
-export async function callExtract(
-  body: ExtractRequestBody
-): Promise<ExtractResponseBody> {
+export async function callExtract(body: ExtractRequestBody): Promise<ExtractResponseBody> {
   return requestJson<ExtractResponseBody>("/v1/extract", {
     method: "POST",
     headers: {
@@ -263,11 +275,19 @@ export function getApiBaseUrl(): string {
   return API_BASE;
 }
 
-export async function getCapabilities(): Promise<CapabilitiesResponseBody> {
-  return requestJson<CapabilitiesResponseBody>("/v1/capabilities", {
+// New: /v1/models
+export async function listModels(): Promise<ModelsResponseBody> {
+  return requestJson<ModelsResponseBody>("/v1/models", {
     method: "GET",
     headers: {
       ...authHeaders(),
     },
   });
+}
+
+// Back-compat: callers can keep using getCapabilities(),
+// but it now comes from /v1/models.deployment_capabilities.
+export async function getCapabilities(): Promise<CapabilitiesResponseBody> {
+  const r = await listModels();
+  return r.deployment_capabilities;
 }

@@ -1,3 +1,4 @@
+# backend/tests/integration/test_generate_integration.py
 from __future__ import annotations
 
 import pytest
@@ -45,13 +46,26 @@ def _override_settings(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.anyio
-async def test_capabilities_generate_only(client):
-    r = await client.get("/v1/capabilities")
+async def test_models_reflect_generate_only(client):
+    r = await client.get("/v1/models")
     assert r.status_code == 200
     body = r.json()
-    assert body["generate"] is True
-    assert body["extract"] is False
-    assert body["mode"] == "generate-only"
+
+    # deployment capability switches now live here
+    assert body["deployment_capabilities"]["generate"] is True
+    assert body["deployment_capabilities"]["extract"] is False
+
+    # sanity: should have at least the default model
+    assert "default_model" in body and body["default_model"]
+
+    # In generate-only integration mode, the default model should have extract=False effectively
+    default_id = body["default_model"]
+    models = {m["id"]: m for m in body["models"]}
+    assert default_id in models
+
+    caps = models[default_id].get("capabilities") or {}
+    assert caps.get("generate") is True
+    assert caps.get("extract") is False
 
 
 @pytest.mark.anyio

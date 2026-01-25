@@ -1,6 +1,7 @@
 service:
-  base_url: "http://127.0.0.1:8000"
-  api_key_env: "EVAL_API_KEY"   # eval runner reads key from env var name
+  # container-friendly default (works inside docker compose)
+  base_url: "${LLM_SERVER_BASE_URL:-http://api:8000}"
+  api_key_env: "EVAL_API_KEY"
 
 run:
   outdir_root: "results"
@@ -27,7 +28,7 @@ datasets:
   extraction_sroie:
     enabled: true
     max_items: 200
-  squad_v2:
+  generate_squad_v2:
     enabled: true
     max_items: 200
 

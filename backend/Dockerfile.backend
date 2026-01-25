@@ -22,4 +22,6 @@ COPY config ./config
 COPY schemas ./schemas
 
 EXPOSE 8000
-CMD ["serve"]
+
+# Run the actual ASGI app (no reliance on a console script named "serve")
+CMD ["python", "-m", "uvicorn", "llm_server.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -24,7 +24,7 @@ token_counting: false
 model:
   default_id: "fake"
   allowed_models: []
-  models_config_path: "config/models.yaml"
+  models_config_path: "config/models.test.yaml"
   dtype: "float16"
   device: "cpu"
 

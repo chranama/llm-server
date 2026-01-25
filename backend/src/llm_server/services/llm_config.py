@@ -22,11 +22,16 @@ DType = Literal["float16", "bfloat16", "float32"]
 
 Quantization = Optional[str]  # e.g. "int8", "int4", "nf4", None
 
+# Capabilities are explicit + strictly validated
+Capability = Literal["generate", "extract"]
+CapabilitiesMap = Dict[Capability, bool]
+
 _ALLOWED_BACKENDS = {"local", "remote"}
 _ALLOWED_LOAD_MODES = {"eager", "lazy", "off"}
 _ALLOWED_DEVICES = {"auto", "cuda", "mps", "cpu"}
 _ALLOWED_DTYPES = {"float16", "bfloat16", "float32"}
 _ALLOWED_QUANT = {None, "int8", "int4", "nf4"}  # extend later as you add support
+_ALLOWED_CAP_KEYS: set[str] = {"generate", "extract"}
 
 
 # -----------------------------
@@ -39,9 +44,14 @@ class ModelSpec:
     """
     Normalized single-model spec.
     """
+
     id: str
     backend: Backend = "local"
     load_mode: LoadMode = "lazy"
+
+    # NEW: per-model capabilities for API gating
+    capabilities: Optional[CapabilitiesMap] = None
+
     dtype: Optional[DType] = None
     device: Device = "auto"
     text_only: Optional[bool] = None
@@ -61,6 +71,7 @@ class ModelsConfig:
     models:     list of ModelSpec in same order as model_ids
     defaults:   any derived defaults used during normalization (for debugging)
     """
+
     primary_id: str
     model_ids: List[str]
     models: List[ModelSpec]
@@ -207,6 +218,63 @@ def _load_yaml(path: str) -> Dict[str, Any]:
     return data
 
 
+def _normalize_capabilities(
+    raw_caps: Any,
+    *,
+    path: str,
+    field: str,
+) -> Optional[CapabilitiesMap]:
+    """
+    Accepts:
+      - None
+      - dict like {generate: true, extract: false}
+
+    Strict:
+      - keys limited to {"generate","extract"}
+      - values must be boolean
+    Returns a normalized dict[str,bool] with only allowed keys, or None.
+    """
+    if raw_caps is None:
+        return None
+
+    if not isinstance(raw_caps, dict):
+        raise AppError(
+            code="models_yaml_invalid",
+            message=f"models.yaml {field} must be a mapping (dict)",
+            status_code=500,
+            extra={"path": path, "field": field, "value": raw_caps},
+        )
+
+    out: Dict[str, bool] = {}
+    for k, v in raw_caps.items():
+        if not isinstance(k, str) or not k.strip():
+            raise AppError(
+                code="models_yaml_invalid",
+                message=f"models.yaml {field} keys must be strings",
+                status_code=500,
+                extra={"path": path, "field": field, "key": k},
+            )
+        kk = k.strip()
+        if kk not in _ALLOWED_CAP_KEYS:
+            raise AppError(
+                code="models_yaml_invalid",
+                message=f"models.yaml {field} has invalid capability key",
+                status_code=500,
+                extra={"path": path, "field": field, "key": kk, "allowed": sorted(list(_ALLOWED_CAP_KEYS))},
+            )
+        if not isinstance(v, bool):
+            raise AppError(
+                code="models_yaml_invalid",
+                message=f"models.yaml {field}.{kk} must be a boolean",
+                status_code=500,
+                extra={"path": path, "field": f"{field}.{kk}", "value": v},
+            )
+        out[kk] = v
+
+    # Type cast to the Literal-based map (safe due to validation above)
+    return out  # type: ignore[return-value]
+
+
 def _normalize_model_entry(
     raw: Any,
     *,
@@ -218,6 +286,11 @@ def _normalize_model_entry(
       - "model_id" (string)
       - {"id": "..."} (minimal)
       - {"id": "...", backend/load_mode/...} (full)
+
+    Supports per-model capabilities:
+      capabilities:
+        generate: true/false
+        extract: true/false
     """
     if isinstance(raw, str):
         mid = _as_str(raw, field="models[]", path=path)
@@ -225,6 +298,7 @@ def _normalize_model_entry(
             id=mid,
             backend=defaults["backend"],
             load_mode=defaults["load_mode"],
+            capabilities=defaults.get("capabilities"),
             dtype=defaults["dtype"],
             device=defaults["device"],
             text_only=defaults["text_only"],
@@ -313,12 +387,17 @@ def _normalize_model_entry(
             extra={"path": path, "field": "models[].trust_remote_code", "value": trc},
         )
 
+    # NEW: per-model capabilities
+    caps_raw = raw.get("capabilities", defaults.get("capabilities"))
+    capabilities = _normalize_capabilities(caps_raw, path=path, field="models[].capabilities")
+
     notes = _as_opt_str(raw.get("notes"))
 
     return ModelSpec(
         id=mid,
         backend=backend,  # type: ignore[assignment]
         load_mode=load_mode,  # type: ignore[assignment]
+        capabilities=capabilities,
         dtype=dtype,  # type: ignore[assignment]
         device=device,  # type: ignore[assignment]
         text_only=text_only,
@@ -369,11 +448,17 @@ def load_models_config() -> ModelsConfig:
                 extra={"path": path},
             )
 
+        # NEW: defaults.capabilities
+        caps_defaults = _normalize_capabilities(defaults.get("capabilities", None), path=path, field="defaults.capabilities")
+
         norm_defaults: Dict[str, Any] = {
-            "backend": _validate_enum(defaults.get("backend", "local"), field="defaults.backend", path=path, allowed=_ALLOWED_BACKENDS) or "local",
-            "load_mode": _validate_enum(defaults.get("load_mode", "lazy"), field="defaults.load_mode", path=path, allowed=_ALLOWED_LOAD_MODES) or "lazy",
+            "backend": _validate_enum(defaults.get("backend", "local"), field="defaults.backend", path=path, allowed=_ALLOWED_BACKENDS)
+            or "local",
+            "load_mode": _validate_enum(defaults.get("load_mode", "lazy"), field="defaults.load_mode", path=path, allowed=_ALLOWED_LOAD_MODES)
+            or "lazy",
             "device": _validate_enum(defaults.get("device", "auto"), field="defaults.device", path=path, allowed=_ALLOWED_DEVICES) or "auto",
             "dtype": None,
+            "capabilities": caps_defaults,
             "text_only": defaults.get("text_only", None),
             "max_context": defaults.get("max_context", None),
             "trust_remote_code": bool(defaults.get("trust_remote_code", False)),
@@ -452,6 +537,7 @@ def load_models_config() -> ModelsConfig:
                         id=primary_id,
                         backend=norm_defaults["backend"],
                         load_mode=norm_defaults["load_mode"],
+                        capabilities=norm_defaults.get("capabilities"),
                         dtype=norm_defaults["dtype"],
                         device=norm_defaults["device"],
                         text_only=norm_defaults["text_only"],
@@ -513,6 +599,7 @@ def load_models_config() -> ModelsConfig:
             id=mid,
             backend="local",
             load_mode="lazy" if mid != primary_id else "eager",
+            capabilities=None,  # legacy path has no per-model caps
             dtype=None,
             device="auto",
             text_only=None,

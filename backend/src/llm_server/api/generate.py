@@ -1,19 +1,24 @@
+# backend/src/llm_server/api/generate.py
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import time
 from functools import lru_cache
 from typing import Any, List
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from transformers import AutoTokenizer
 
-from llm_server.api.deps import get_api_key, get_llm
-from llm_server.core.config import get_settings
-from llm_server.core.errors import AppError
+from llm_server.api.deps import (
+    fingerprint_pydantic,
+    get_api_key,
+    get_llm,
+    make_cache_redis_key,
+    require_capability,
+    resolve_model,
+    sha32,
+)
 from llm_server.core.redis import get_redis_from_request
 import llm_server.db.session as db_session  # module import so tests can patch session wiring
 from llm_server.services.inference import (
@@ -24,7 +29,6 @@ from llm_server.services.inference import (
     write_cache,
     write_inference_log,
 )
-from llm_server.services.llm import MultiModelManager
 
 router = APIRouter()
 
@@ -68,61 +72,6 @@ class BatchGenerateResponse(BaseModel):
     results: List[BatchGenerateResult]
 
 
-def resolve_model(llm: Any, model_override: str | None) -> tuple[str, Any]:
-    s = get_settings()
-    allowed = s.all_model_ids
-
-    if model_override is None:
-        model_id = s.model_id
-    else:
-        model_id = model_override
-        if model_id not in allowed:
-            raise AppError(
-                code="model_not_allowed",
-                message=f"Model '{model_id}' not allowed.",
-                status_code=status.HTTP_400_BAD_REQUEST,
-                extra={"allowed": allowed},
-            )
-
-    if isinstance(llm, MultiModelManager):
-        if model_id not in llm:
-            raise AppError(
-                code="model_missing",
-                message=f"Model '{model_id}' not found in LLM registry",
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-        return model_id, llm[model_id]
-
-    if isinstance(llm, dict):
-        if model_id not in llm:
-            raise AppError(
-                code="model_missing",
-                message=f"Model '{model_id}' not found in LLM registry",
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-        return model_id, llm[model_id]
-
-    return model_id, llm
-
-
-def hash_prompt(prompt: str) -> str:
-    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:32]
-
-
-def fingerprint_params(body: GenerateRequest) -> str:
-    params = body.model_dump(exclude={"prompt", "model", "cache"}, exclude_none=True)
-    return hashlib.sha256(json.dumps(params, sort_keys=True).encode()).hexdigest()[:32]
-
-
-def fingerprint_batch_params(body: BatchGenerateRequest) -> str:
-    params = body.model_dump(exclude={"prompts", "model"}, exclude_none=True)
-    return hashlib.sha256(json.dumps(params, sort_keys=True).encode()).hexdigest()[:32]
-
-
-def make_redis_key(model_id: str, prompt_hash: str, params_fp: str) -> str:
-    return f"llm:cache:{model_id}:{prompt_hash}:{params_fp}"
-
-
 @lru_cache(maxsize=16)
 def _get_tokenizer(model_id: str):
     return AutoTokenizer.from_pretrained(model_id, use_fast=True)
@@ -147,20 +96,6 @@ def count_tokens(model_id: str, prompt: str, completion: str | None) -> tuple[in
         return None, None
 
 
-def _require_generate_enabled() -> None:
-    s = get_settings()
-    if not s.enable_generate:
-        raise AppError(
-            code="capability_disabled",
-            message="Generation is disabled in this deployment mode.",
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            extra={
-                "capability": "generate",
-                "hint": "Set ENABLE_GENERATE=true to enable generation.",
-            },
-        )
-
-
 @router.post("/v1/generate")
 async def generate(
     request: Request,
@@ -168,16 +103,15 @@ async def generate(
     api_key=Depends(get_api_key),
     llm: Any = Depends(get_llm),
 ):
-    _require_generate_enabled()
-
-    model_id, model = resolve_model(llm, body.model)
+    model_id, model = resolve_model(llm, body.model, capability="generate", request=request)
+    require_capability(model_id, "generate", request=request)
     set_request_meta(request, route="/v1/generate", model_id=model_id, cached=False)
 
     request_id = getattr(request.state, "request_id", None)
 
-    prompt_hash = hash_prompt(body.prompt)
-    params_fp = fingerprint_params(body)
-    redis_key = make_redis_key(model_id, prompt_hash, params_fp)
+    prompt_hash = sha32(body.prompt)
+    params_fp = fingerprint_pydantic(body, exclude={"prompt", "model", "cache"})
+    redis_key = make_cache_redis_key(model_id, prompt_hash, params_fp)
 
     cache = CacheSpec(
         model_id=model_id,
@@ -278,14 +212,13 @@ async def generate_batch(
     api_key=Depends(get_api_key),
     llm: Any = Depends(get_llm),
 ):
-    _require_generate_enabled()
-
-    model_id, model = resolve_model(llm, body.model)
+    model_id, model = resolve_model(llm, body.model, capability="generate", request=request)
+    require_capability(model_id, "generate", request=request)
     set_request_meta(request, route="/v1/generate/batch", model_id=model_id, cached=False)
 
     request_id = getattr(request.state, "request_id", None)
 
-    params_fp = fingerprint_batch_params(body)
+    params_fp = fingerprint_pydantic(body, exclude={"prompts", "model"})
     redis = get_redis_from_request(request)
 
     results: list[BatchGenerateResult] = []
@@ -294,8 +227,8 @@ async def generate_batch(
     async with db_session.get_sessionmaker()() as session:
         for prompt in body.prompts:
             item_start = time.time()
-            prompt_hash = hash_prompt(prompt)
-            redis_key = make_redis_key(model_id, prompt_hash, params_fp)
+            prompt_hash = sha32(prompt)
+            redis_key = make_cache_redis_key(model_id, prompt_hash, params_fp)
 
             cache = CacheSpec(
                 model_id=model_id,

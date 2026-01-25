@@ -54,12 +54,11 @@ export function Playground() {
         setCaps({
           generate: Boolean((c as any)?.generate),
           extract: Boolean((c as any)?.extract),
-          mode: String((c as any)?.mode ?? "unknown"),
         });
       } catch {
         if (canceled) return;
         // Safe fallback: generate-only UI
-        setCaps({ generate: true, extract: false, mode: "unknown" });
+        setCaps({ generate: true, extract: false });
       }
     }
 
@@ -468,8 +467,7 @@ export function Playground() {
         >
           <div style={{ fontWeight: 700, marginBottom: 4 }}>Extraction disabled</div>
           <div style={{ fontSize: 13, color: "#334155" }}>
-            This deployment is running in <span style={{ fontWeight: 700 }}>generate-only</span> mode. Generate remains
-            available.
+            This deployment has <span style={{ fontWeight: 700 }}>extract disabled</span>. Generate remains available.
           </div>
         </div>
       )}

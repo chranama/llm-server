@@ -1,3 +1,4 @@
+# backend/tests/unit/test_schema_registry_unit.py
 from __future__ import annotations
 
 import json
@@ -7,7 +8,10 @@ pytestmark = pytest.mark.unit
 
 
 def test_schema_registry_load_schema_from_schemas_dir(monkeypatch, tmp_path):
-    from llm_server.core.schema_registry import load_schema, list_schemas, SchemaNotFoundError
+    import llm_server.core.schema_registry as sr
+
+    # Avoid cross-test contamination from module-level cache
+    sr._SCHEMA_CACHE.clear()
 
     schema = {
         "title": "UnitSchema",
@@ -19,11 +23,11 @@ def test_schema_registry_load_schema_from_schemas_dir(monkeypatch, tmp_path):
     (tmp_path / "unit_v1.json").write_text(json.dumps(schema), encoding="utf-8")
     monkeypatch.setenv("SCHEMAS_DIR", str(tmp_path))
 
-    idx = list_schemas()
+    idx = sr.list_schemas()
     assert any(s.schema_id == "unit_v1" for s in idx)
 
-    loaded = load_schema("unit_v1")
+    loaded = sr.load_schema("unit_v1")
     assert loaded["title"] == "UnitSchema"
 
-    with pytest.raises(SchemaNotFoundError):
-        load_schema("does_not_exist")
+    with pytest.raises(sr.SchemaNotFoundError):
+        sr.load_schema("does_not_exist")

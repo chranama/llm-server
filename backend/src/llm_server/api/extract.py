@@ -1,6 +1,6 @@
+# backend/src/llm_server/api/extract.py
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import time
@@ -10,8 +10,15 @@ from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from llm_server.api.deps import get_api_key, get_llm
-from llm_server.core.config import get_settings
+from llm_server.api.deps import (
+    fingerprint_pydantic,
+    get_api_key,
+    get_llm,
+    make_extract_redis_key,
+    require_capability,
+    resolve_model,
+    sha32,
+)
 from llm_server.core.errors import AppError
 from llm_server.core.metrics import (
     EXTRACTION_CACHE_HITS,
@@ -31,7 +38,7 @@ from llm_server.core.validation import (
     JSONSchemaValidationError,
     validate_jsonschema,
 )
-import llm_server.db.session as db_session
+import llm_server.db.session as db_session  # module import so tests can patch session wiring
 from llm_server.services.inference import (
     CacheSpec,
     get_cached_output,
@@ -39,7 +46,6 @@ from llm_server.services.inference import (
     write_cache,
     write_inference_log,
 )
-from llm_server.services.llm import MultiModelManager
 
 router = APIRouter()
 
@@ -53,7 +59,7 @@ class ExtractRequest(BaseModel):
     schema_id: str = Field(..., description="Schema id (e.g. ticket_v1, invoice_v1, receipt_v1)")
     text: str = Field(..., description="Raw text or OCR text to extract from")
 
-    model: str | None = None
+    model: str | None = Field(default=None, description="Optional model id override for multi-model routing")
 
     max_new_tokens: int | None = 512
     temperature: float | None = 0.0
@@ -68,71 +74,6 @@ class ExtractResponse(BaseModel):
     data: dict[str, Any]
     cached: bool
     repair_attempted: bool
-
-
-def resolve_model(llm: Any, model_override: str | None) -> tuple[str, Any]:
-    s = get_settings()
-    allowed = s.all_model_ids
-
-    if model_override is None:
-        model_id = s.model_id
-    else:
-        model_id = model_override
-        if model_id not in allowed:
-            raise AppError(
-                code="model_not_allowed",
-                message=f"Model '{model_id}' not allowed.",
-                status_code=status.HTTP_400_BAD_REQUEST,
-                extra={"allowed": allowed},
-            )
-
-    if isinstance(llm, MultiModelManager):
-        if model_id not in llm:
-            raise AppError(
-                code="model_missing",
-                message=f"Model '{model_id}' not found in LLM registry",
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-        return model_id, llm[model_id]
-
-    if isinstance(llm, dict):
-        if model_id not in llm:
-            raise AppError(
-                code="model_missing",
-                message=f"Model '{model_id}' not found in LLM registry",
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-        return model_id, llm[model_id]
-
-    return model_id, llm
-
-
-def _require_extract_enabled() -> None:
-    s = get_settings()
-    if not s.enable_extract:
-        raise AppError(
-            code="capability_disabled",
-            message="Extraction is disabled in this deployment mode.",
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            extra={
-                "capability": "extract",
-                "hint": "Set ENABLE_EXTRACT=true (and use an extraction-capable backend) to enable extraction.",
-            },
-        )
-
-
-def _hash_text(schema_id: str, text: str) -> str:
-    payload = f"{schema_id}\n{text}".encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()[:32]
-
-
-def _fingerprint_params(body: ExtractRequest) -> str:
-    params = body.model_dump(exclude={"text", "model", "cache", "repair"}, exclude_none=True)
-    return hashlib.sha256(json.dumps(params, sort_keys=True).encode("utf-8")).hexdigest()[:32]
-
-
-def _make_redis_key(model_id: str, prompt_hash: str, params_fp: str) -> str:
-    return f"llm:extract:{model_id}:{prompt_hash}:{params_fp}"
 
 
 def _strip_wrapping_code_fences(s: str) -> str:
@@ -346,9 +287,11 @@ async def extract(
     api_key=Depends(get_api_key),
     llm: Any = Depends(get_llm),
 ):
-    _require_extract_enabled()
+    model_id, model = resolve_model(llm, body.model, capability="extract", request=request)
 
-    model_id, model = resolve_model(llm, body.model)
+    # Single enforcement path: deployment gate + per-model gate
+    require_capability(model_id, "extract", request=request)
+
     set_request_meta(request, route="/v1/extract", model_id=model_id, cached=False)
 
     request_id = getattr(request.state, "request_id", None)
@@ -372,9 +315,9 @@ async def extract(
             extra={"schema_id": e.schema_id},
         ) from e
 
-    prompt_hash = _hash_text(body.schema_id, body.text)
-    params_fp = _fingerprint_params(body)
-    redis_key = _make_redis_key(model_id, prompt_hash, params_fp)
+    prompt_hash = sha32(f"{body.schema_id}\n{body.text}")
+    params_fp = fingerprint_pydantic(body, exclude={"text", "model", "cache", "repair"})
+    redis_key = make_extract_redis_key(model_id, prompt_hash, params_fp)
 
     cache = CacheSpec(
         model_id=model_id,

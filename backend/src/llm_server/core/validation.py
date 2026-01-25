@@ -48,9 +48,10 @@ def parse_json_strict(text: str) -> Any:
     Strict JSON parsing.
 
     Requirements:
-      - Input must be a single JSON value
-      - No code fences, no surrounding commentary, no trailing garbage
+      - Input must be a single JSON value (no trailing garbage)
+      - No code fences, no surrounding commentary
       - Disallow NaN / Infinity / -Infinity (not valid JSON)
+      - Top-level MUST be a JSON object (dict) for our extraction contract
     """
     if text is None:
         raise StrictJSONError(code="invalid_json", message="No text to parse")
@@ -60,7 +61,8 @@ def parse_json_strict(text: str) -> Any:
         raise StrictJSONError(code="invalid_json", message="Empty text; expected JSON")
 
     # Common LLM failure mode: ```json ... ```
-    if s.startswith("```") or "```" in s:
+    # Reject both "starts with" and "contains" to prevent fenced blocks anywhere.
+    if s.startswith("```") or "```" in s or s.startswith("~~~") or "~~~" in s:
         raise StrictJSONError(
             code="invalid_json",
             message="Model output contained a code fence; expected raw JSON only",
@@ -76,7 +78,28 @@ def parse_json_strict(text: str) -> Any:
         )
 
     try:
-        return json.loads(s, parse_constant=_no_constants)
+        # Use raw_decode so we can detect trailing garbage precisely.
+        decoder = json.JSONDecoder(parse_constant=_no_constants)
+        obj, end = decoder.raw_decode(s)
+
+        # Reject trailing non-whitespace (e.g., '{"a":1} trailing')
+        if s[end:].strip():
+            raise StrictJSONError(
+                code="invalid_json",
+                message="Model output contained trailing characters after JSON",
+                hint="Return ONLY a JSON object (no extra text before/after).",
+            )
+
+        # Enforce top-level object contract
+        if not isinstance(obj, dict):
+            raise StrictJSONError(
+                code="invalid_json",
+                message="Top-level JSON must be an object",
+                hint="Return a JSON object like {\"field\": \"value\"}, not an array or scalar.",
+            )
+
+        return obj
+
     except StrictJSONError:
         raise
     except json.JSONDecodeError as e:

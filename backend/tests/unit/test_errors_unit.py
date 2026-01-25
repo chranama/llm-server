@@ -1,4 +1,7 @@
+# backend/tests/unit/test_errors_unit.py
 from __future__ import annotations
+
+import json
 
 import pytest
 
@@ -6,12 +9,12 @@ pytestmark = pytest.mark.unit
 
 
 class DummyState:
-    def __init__(self, request_id):
+    def __init__(self, request_id: str):
         self.request_id = request_id
 
 
 class DummyRequest:
-    def __init__(self, request_id="rid123"):
+    def __init__(self, request_id: str = "rid123"):
         self.state = DummyState(request_id)
 
 
@@ -19,8 +22,8 @@ def test_to_json_error_shape_and_request_id_header():
     from llm_server.core.errors import _to_json_error
 
     req = DummyRequest("abc")
-    resp = _to_json_error(
-        req,  # type: ignore[arg-type]
+    resp = _to_json_error(  # type: ignore[arg-type]
+        req,
         status_code=418,
         code="teapot",
         message="nope",
@@ -30,8 +33,8 @@ def test_to_json_error_shape_and_request_id_header():
     assert resp.status_code == 418
     assert resp.headers.get("X-Request-ID") == "abc"
 
-    body = resp.body.decode("utf-8")
-    assert '"code":"teapot"' in body
-    assert '"message":"nope"' in body
-    assert '"foo":"bar"' in body
-    assert '"request_id":"abc"' in body
+    payload = json.loads(resp.body.decode("utf-8"))
+    assert payload["code"] == "teapot"
+    assert payload["message"] == "nope"
+    assert payload["request_id"] == "abc"
+    assert payload["extra"]["foo"] == "bar"

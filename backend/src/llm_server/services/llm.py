@@ -12,7 +12,7 @@ import transformers as tf
 from llm_server.core.config import get_settings
 from llm_server.core.errors import AppError
 from llm_server.services.llm_api import HttpLLMClient
-from llm_server.services.llm_config import load_models_config
+from llm_server.services.llm_config import load_models_config, ModelSpec
 from llm_server.services.llm_registry import MultiModelManager
 
 # -----------------------------------
@@ -94,6 +94,73 @@ def _configure_hf_cache_env(cfg) -> dict[str, str]:
     }
 
 
+def _truthy_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _caps_meta(sp: Optional[ModelSpec]) -> Optional[list[str]]:
+    """
+    Normalize per-model capabilities for registry metadata.
+
+    Contract (aligned with MultiModelManager + unit tests):
+      - None => unspecified (registry treats as allow-all)
+      - list[str] => allowlist
+      - dict[str,bool] => keys with True are enabled
+      - str => single capability
+    Returned value is a stable, sorted list[str] (or None).
+    """
+    if sp is None:
+        return None
+
+    caps = getattr(sp, "capabilities", None)
+    if caps is None:
+        return None
+
+    def _norm_one(x: object) -> Optional[str]:
+        if not isinstance(x, str):
+            return None
+        s = x.strip().lower()
+        return s or None
+
+    out: list[str] = []
+
+    if isinstance(caps, dict):
+        for k, v in caps.items():
+            kk = _norm_one(k)
+            if not kk:
+                continue
+            if bool(v):
+                out.append(kk)
+
+    elif isinstance(caps, (list, tuple, set)):
+        for x in caps:
+            s = _norm_one(x)
+            if s:
+                out.append(s)
+
+    elif isinstance(caps, str):
+        s = _norm_one(caps)
+        if s:
+            out.append(s)
+
+    else:
+        # unknown type => treat as unspecified/fail-open
+        return None
+
+    # de-dupe + stable ordering (sorted)
+    out = sorted(set(out))
+    return out or None
+
+def _make_http_client(*, base_url: str, model_id: str, timeout: int = 60):
+    try:
+        return HttpLLMClient(base_url=base_url, model_id=model_id, timeout=timeout)
+    except TypeError:
+        # test FakeHttpClient doesn’t accept timeout
+        return HttpLLMClient(base_url=base_url, model_id=model_id)
+
 # ===================================
 # LOCAL MODEL MANAGER
 # ===================================
@@ -102,10 +169,6 @@ def _configure_hf_cache_env(cfg) -> dict[str, str]:
 class ModelManager:
     """
     Local (in-process) HF Transformers backend.
-
-    Lazy-loads: ensure_loaded() is only called by:
-      - app startup in eager mode
-      - right before generate()
     """
 
     def __init__(
@@ -114,10 +177,12 @@ class ModelManager:
         model_id: str,
         device: str,
         dtype: torch.dtype,
+        trust_remote_code: bool = False,
     ) -> None:
         self.model_id: str = model_id
         self._device: str = device
         self._dtype: torch.dtype = dtype
+        self._trust_remote_code: bool = bool(trust_remote_code)
         self._tokenizer = None
         self._model = None
 
@@ -127,13 +192,14 @@ class ModelManager:
         dtype = DTYPE_MAP.get(dtype_str, torch.float16)
         device = _device_from_settings(cfg)
         model_id = getattr(cfg, "model_id", "mistralai/Mistral-7B-v0.1")
-        return cls(model_id=model_id, device=device, dtype=dtype)
+        return cls(model_id=model_id, device=device, dtype=dtype, trust_remote_code=False)
 
     def _err_ctx(self) -> dict[str, Any]:
         return {
             "model_id": self.model_id,
             "device": str(self._device),
             "dtype": str(self._dtype),
+            "trust_remote_code": bool(self._trust_remote_code),
             "env_HOME": os.environ.get("HOME"),
             "HF_HOME": os.environ.get("HF_HOME"),
             "HF_HUB_CACHE": os.environ.get("HF_HUB_CACHE"),
@@ -156,15 +222,18 @@ class ModelManager:
                     self.model_id,
                     use_fast=True,
                     cache_dir=cache_dir,
+                    trust_remote_code=self._trust_remote_code,
                 )
                 if getattr(self._tokenizer, "pad_token", None) is None:
                     self._tokenizer.pad_token = self._tokenizer.eos_token
 
             if self._model is None:
-                hf_cfg = AutoConfig.from_pretrained(self.model_id)
+                hf_cfg = AutoConfig.from_pretrained(
+                    self.model_id,
+                    trust_remote_code=self._trust_remote_code,
+                )
 
                 dtype = self._dtype
-                # MPS + bf16 is generally problematic
                 if str(self._device) == "mps" and dtype == torch.bfloat16:
                     dtype = torch.float16
 
@@ -174,6 +243,7 @@ class ModelManager:
                         torch_dtype=dtype,
                         low_cpu_mem_usage=True,
                         cache_dir=cache_dir,
+                        trust_remote_code=self._trust_remote_code,
                     )
                 except ValueError:
                     archs = getattr(hf_cfg, "architectures", None) or []
@@ -188,6 +258,7 @@ class ModelManager:
                         torch_dtype=dtype,
                         low_cpu_mem_usage=True,
                         cache_dir=cache_dir,
+                        trust_remote_code=self._trust_remote_code,
                     )
 
                 self._model.to(self._device)
@@ -276,51 +347,116 @@ def build_llm_from_settings() -> Any:
     """
     Construct the service LLM backend.
 
-    Behavior:
-      - If exactly 1 model id -> local ModelManager
-      - If multiple model ids:
-          - primary is local ModelManager
-          - non-primary are remote HttpLLMClient (requires llm_service_url)
-          - wrapped in MultiModelManager registry
+    Medium gating behavior (safe default):
+      - By default, expose ONLY the primary model locally.
+      - If ENABLE_MULTI_MODELS=1, expose additional models from models.yaml.
 
-    NOTE: MultiModelManager.ensure_loaded() loads only the default model
-    (cloud-friendly). Non-default models remain lazy until requested.
+    Any model with load_mode == "off" is excluded from the registry entirely.
+
+    Per-model capabilities are propagated into registry metadata for API gating/UI.
+
+    IMPORTANT:
+      - meta["capabilities"] is:
+          * None  => unspecified (registry treats as allow-all)
+          * dict  => explicitly specified per-model caps
     """
     cfg = load_models_config()
     primary_id = cfg.primary_id
-    all_ids = cfg.model_ids
-
     s = get_settings()
+    http_timeout = int(getattr(s, "http_client_timeout", 60) or 60)
 
-    if len(all_ids) == 1:
+    multi_enabled = _truthy_env("ENABLE_MULTI_MODELS", default=False)
+
+    # Global load mode override (env wins, then settings)
+    global_load_mode = (os.getenv("MODEL_LOAD_MODE") or getattr(s, "model_load_mode", None) or "").strip().lower()
+
+    # If globally off, return an empty registry (unit tests expect this shape).
+    if global_load_mode == "off":
+        return MultiModelManager(models={}, default_id=primary_id, model_meta={})
+
+    spec_map: Dict[str, ModelSpec] = {sp.id: sp for sp in cfg.models}
+    ordered_ids: List[str] = [
+        mid for mid in cfg.model_ids if (spec_map.get(mid) and spec_map[mid].load_mode != "off")
+    ]
+
+    if not ordered_ids:
+        raise AppError(
+            code="model_config_invalid",
+            message="No enabled models after applying load_mode=off filters",
+            status_code=500,
+            extra={"primary_id": primary_id, "configured_ids": cfg.model_ids},
+        )
+
+    if primary_id in ordered_ids:
+        ordered_ids = [primary_id] + [x for x in ordered_ids if x != primary_id]
+    else:
+        primary_id = ordered_ids[0]
+
+    if not multi_enabled:
+        ordered_ids = [primary_id]
+
+    def _need_service_url_for(mid: str) -> bool:
+        sp = spec_map.get(mid)
+        return bool(sp and sp.backend == "remote")
+
+    if any(_need_service_url_for(mid) for mid in ordered_ids):
+        if not getattr(s, "llm_service_url", None):
+            raise AppError(
+                code="remote_models_require_llm_service_url",
+                message="Remote models configured but llm_service_url is not set",
+                status_code=500,
+                extra={"primary_id": primary_id, "model_ids": ordered_ids},
+            )
+
+    # Single model shortcut
+    if len(ordered_ids) == 1:
+        sp = spec_map.get(primary_id)
+        backend = (sp.backend if sp else "local")
+
+        if backend == "remote":
+            return _make_http_client(base_url=s.llm_service_url, model_id=primary_id, timeout=http_timeout)
+
         mgr = ModelManager.from_settings(s)
         mgr.model_id = primary_id
+        if sp is not None:
+            trc = bool(getattr(sp, "trust_remote_code", False))
+            # internal flag for your real ModelManager
+            if hasattr(mgr, "_trust_remote_code"):
+                mgr._trust_remote_code = trc  # type: ignore[attr-defined]
+            # public attribute for test + compatibility
+            setattr(mgr, "trust_remote_code", trc)
         return mgr
-
-    if not getattr(s, "llm_service_url", None):
-        raise AppError(
-            code="remote_models_require_llm_service_url",
-            message="Multiple models configured but llm_service_url is not set",
-            status_code=500,
-            extra={"primary_id": primary_id, "all_model_ids": all_ids},
-        )
 
     models: Dict[str, Any] = {}
     meta: Dict[str, Dict[str, Any]] = {}
 
-    local = ModelManager.from_settings(s)
-    local.model_id = primary_id
-    models[primary_id] = local
-    meta[primary_id] = {"backend": "local_hf", "load_mode": "lazy(default eager-by-lifespan)"}
+    for mid in ordered_ids:
+        sp = spec_map.get(mid)
+        backend = (sp.backend if sp else "local")
+        caps = _caps_meta(sp)
 
-    for mid in all_ids:
-        if mid == primary_id:
+        if backend == "remote":
+            models[mid] = _make_http_client(base_url=s.llm_service_url, model_id=mid, timeout=http_timeout)
+            meta[mid] = {
+                "backend": "http_remote",
+                "load_mode": "remote",
+                "capabilities": caps,  # None => unspecified; dict => explicit
+            }
             continue
-        models[mid] = HttpLLMClient(
-            base_url=s.llm_service_url,
-            model_id=mid,
-            timeout=s.http_client_timeout,
-        )
-        meta[mid] = {"backend": "http_remote", "load_mode": "remote"}
+
+        mm = ModelManager.from_settings(s)
+        mm.model_id = mid
+        if sp is not None:
+            trc = bool(getattr(sp, "trust_remote_code", False))
+            if hasattr(mm, "_trust_remote_code"):
+                mm._trust_remote_code = trc  # type: ignore[attr-defined]
+            setattr(mm, "trust_remote_code", trc)
+
+        models[mid] = mm
+        meta[mid] = {
+            "backend": "local_hf",
+            "load_mode": "lazy(default eager-by-lifespan)" if mid == primary_id else "lazy",
+            "capabilities": caps,  # None => unspecified; dict => explicit
+        }
 
     return MultiModelManager(models=models, default_id=primary_id, model_meta=meta)

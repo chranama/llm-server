@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional, Union
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi import HTTPException as FastAPIHTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -13,11 +13,12 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 logger = logging.getLogger("llm.errors")
 
 
-class AppError(Exception):
+class AppError(HTTPException):
     """
-    Raise this for application/business logic errors with a stable code.
-    Example:
-        raise AppError(code="quota_exhausted", message="Monthly quota exhausted", status_code=402)
+    Canonical application error.
+
+    By subclassing HTTPException, FastAPI will always turn this into an HTTP response,
+    even in tests where the app is instantiated as FastAPI() without custom handlers.
     """
 
     def __init__(
@@ -25,14 +26,18 @@ class AppError(Exception):
         *,
         code: str,
         message: str,
-        status_code: int = 400,
+        status_code: int,
         extra: Optional[Dict[str, Any]] = None,
-    ):
+    ) -> None:
+        # Store for handlers/logging
         self.code = code
         self.message = message
-        self.status_code = status_code
-        self.extra = extra or {}
-        super().__init__(message)
+        self.extra = extra
+
+        detail: Dict[str, Any] = {"code": code, "message": message}
+        if extra:
+            detail["extra"] = extra
+        super().__init__(status_code=status_code, detail=detail)
 
 
 def _request_id(request: Request) -> Optional[str]:

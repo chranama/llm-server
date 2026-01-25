@@ -5,8 +5,8 @@ services:
   # ==========================
   postgres:
     image: postgres:16-alpine
-    container_name: llm_postgres
     restart: unless-stopped
+    profiles: ["infra"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-llm}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-llm}
@@ -23,13 +23,13 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: llm_redis
     restart: unless-stopped
+    profiles: ["infra"]
     command: ["redis-server", "--save", "", "--appendonly", "no"]
-    volumes:
-      - redis_data:/data
     expose:
       - "6379"
+    volumes:
+      - redis_data:/data
     healthcheck:
       test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
       interval: 5s
@@ -37,94 +37,156 @@ services:
       retries: 10
 
   # ==========================
-  # API (container mode)
+  # Integration test infra (ephemeral)
   # ==========================
-  api:
+  postgres_itest:
+    image: postgres:16-alpine
+    restart: "no"
+    profiles: ["itest"]
+    environment:
+      POSTGRES_USER: ${ITEST_POSTGRES_USER:-llm}
+      POSTGRES_PASSWORD: ${ITEST_POSTGRES_PASSWORD:-llm}
+      POSTGRES_DB: ${ITEST_POSTGRES_DB:-llm_test}
+    expose:
+      - "5432"
+    # disposable + fast (no named volume)
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${ITEST_POSTGRES_USER:-llm} -d ${ITEST_POSTGRES_DB:-llm_test}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis_itest:
+    image: redis:7-alpine
+    restart: "no"
+    profiles: ["itest"]
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    expose:
+      - "6379"
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ==========================
+  # API base template
+  # ==========================
+  api_base: &api_base
     build:
       context: ../..
       dockerfile: backend/Dockerfile.backend
-    container_name: llm_api
     restart: "no"
     environment:
       APP_ROOT: "/app"
-      ENV: prod
-      MODEL_LOAD_MODE: eager
-      WORKERS: "1"
-      UVICORN_RELOAD: "0"
+
+      # Defaults (local/dev)
+      ENV: ${ENV:-dev}
+      MODEL_LOAD_MODE: ${MODEL_LOAD_MODE:-lazy}
+      REQUIRE_MODEL_READY: ${REQUIRE_MODEL_READY:-0}
+
+      CAPABILITIES: ${CAPABILITIES:-}
+
+      # infra toggles
+      REDIS_ENABLED: ${REDIS_ENABLED:-0}
+
+      WORKERS: ${WORKERS:-1}
+      UVICORN_RELOAD: ${UVICORN_RELOAD:-0}
+
+      MODELS_YAML: ${MODELS_YAML:-/app/config/models.yaml}
+
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_started
+
+  # ==========================
+  # API (integration-test profile)
+  # ==========================
+  api_itest:
+    <<: *api_base
+    profiles: ["itest"]
+    environment:
+      ENV: test
+      MODEL_LOAD_MODE: off
+      REQUIRE_MODEL_READY: "0"
+
+      # For integration tests that use DB wiring
+      DATABASE_URL: ${ITEST_DATABASE_URL:-postgresql+asyncpg://llm:llm@postgres_itest:5432/llm_test}
+
+      # Turn this on if you want cache paths exercised in itest
+      REDIS_ENABLED: ${ITEST_REDIS_ENABLED:-1}
+      REDIS_URL: ${ITEST_REDIS_URL:-redis://redis_itest:6379/0}
+
+      # Optional: make it explicit that this should never warm models
+      MODEL_WARMUP: "0"
+    ports: []
+    expose:
+      - "8000"
+    depends_on:
+      postgres_itest:
         condition: service_healthy
+      redis_itest:
+        condition: service_healthy
+
+  # ==========================
+  # API (CPU / portable)
+  # Capabilities chosen via models.yaml
+  # ==========================
+  api:
+    <<: *api_base
+    profiles: ["api"]
+    ports:
+      - "${API_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  # ==========================
+  # API (GPU / generate-or-extract via models.yaml)
+  # ==========================
+  api_gpu:
+    <<: *api_base
+    profiles: ["api-gpu"]
+    environment:
+      ENV: ${ENV:-prod}
+      MODEL_LOAD_MODE: ${MODEL_LOAD_MODE:-eager}
+      REQUIRE_MODEL_READY: ${REQUIRE_MODEL_READY:-1}
+      MODEL_DEVICE: "gpu"
+      REDIS_ENABLED: ${REDIS_ENABLED:-1}
+      UVICORN_RELOAD: "0"
+      MODELS_YAML: ${MODELS_YAML:-/app/config/models.yaml}
+      CAPABILITIES: ${CAPABILITIES:-}
+    ports: []
     expose:
       - "8000"
     volumes:
       - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+      # If you keep repo config checked in, bind-mount it (optional):
       # - ../../config:/app/config:ro
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000/modelz || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/modelz || exit 1"]
       interval: 30s
       timeout: 10s
       start_period: 600s
       retries: 10
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: ["gpu"]
 
   # ==========================
-  # pgAdmin (behind nginx)
-  # ==========================
-  pgadmin:
-    image: dpage/pgadmin4:8
-    container_name: llm_pgadmin
-    restart: unless-stopped
-    environment:
-      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
-      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
-      PGADMIN_CONFIG_SERVER_MODE: "False"
-      SCRIPT_NAME: /pgadmin
-    depends_on:
-      postgres:
-        condition: service_healthy
-    expose:
-      - "80"
-
-  # ==========================
-  # Observability (behind nginx)
-  # ==========================
-  prometheus:
-    image: prom/prometheus:v2.54.1
-    container_name: llm_prometheus
-    restart: unless-stopped
-    command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--web.external-url=http://localhost:8080/prometheus/"
-      - "--web.route-prefix=/"
-    volumes:
-      - ../observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-    depends_on:
-      api:
-        condition: service_healthy
-    expose:
-      - "9090"
-
-  grafana:
-    image: grafana/grafana:11.1.0
-    container_name: llm_grafana
-    restart: unless-stopped
-    environment:
-      GF_SERVER_ROOT_URL: "http://localhost:8080/grafana/"
-      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
-      GF_SERVER_DOMAIN: "localhost"
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ../observability/grafana/grafana/provisioning:/etc/grafana/provisioning
-      - ../observability/grafana/grafana/dashboards:/var/lib/grafana/dashboards
-    depends_on:
-      prometheus:
-        condition: service_started
-    expose:
-      - "3000"
-
-  # ==========================
-  # UI (served by its own nginx container, behind front nginx)
+  # UI
   # ==========================
   ui:
     build:
@@ -132,38 +194,89 @@ services:
       dockerfile: Dockerfile.ui
       args:
         VITE_API_KEY: ${API_KEY}
-        VITE_API_BASE_URL: "/api"
-    container_name: llm_ui
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
     restart: unless-stopped
-    depends_on:
-      api:
-        condition: service_started
-    expose:
-      - "80"
+    profiles: ["ui"]
+    ports:
+      - "${UI_PORT:-5173}:80"
 
   # ==========================
-  # Front Nginx (single public entrypoint)
+  # Admin
   # ==========================
-  nginx:
-    image: nginx:1.27-alpine
-    container_name: llm_nginx
+  pgadmin:
+    image: dpage/pgadmin4:8
     restart: unless-stopped
-    ports:
-      - "8080:80"
-    volumes:
-      - ../observability/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ../observability/nginx/.htpasswd:/etc/nginx/.htpasswd:ro
+    profiles: ["admin"]
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
     depends_on:
-      grafana:
-        condition: service_started
-      prometheus:
-        condition: service_started
-      pgadmin:
-        condition: service_started
-      ui:
-        condition: service_started
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+
+  # ==========================
+  # Observability (docker API)
+  # ==========================
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    restart: unless-stopped
+    profiles: ["obs"]
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    volumes:
+      - ../observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "${PROM_PORT:-9090}:9090"
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    restart: unless-stopped
+    profiles: ["obs", "obs-host"]
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ../observability/grafana/grafana/provisioning:/etc/grafana/provisioning
+      - ../observability/grafana/grafana/dashboards:/var/lib/grafana/dashboards
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+
+  prometheus_host:
+    image: prom/prometheus:v2.54.1
+    restart: unless-stopped
+    profiles: ["obs-host"]
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    volumes:
+      - ../observability/prometheus/prometheus.host.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "${PROM_HOST_PORT:-9091}:9090"
+
+  # ==========================
+  # Eval
+  # ==========================
+  eval:
+    build:
+      context: ../..
+      dockerfile: eval/Dockerfile.eval
+    restart: "no"
+    profiles: ["eval"]
+    environment:
+      API_BASE_URL: ${API_BASE_URL:-http://api:8000}
+      EVAL_ARGS: ${EVAL_ARGS:-}
+
+  eval_host:
+    build:
+      context: ../..
+      dockerfile: eval/Dockerfile.eval
+    restart: "no"
+    profiles: ["eval-host"]
+    environment:
+      API_BASE_URL: ${API_BASE_URL:-http://host.docker.internal:${API_PORT:-8000}}
+      EVAL_ARGS: ${EVAL_ARGS:-}
 
 volumes:
   pg_data:
-  grafana_data:
   redis_data:
+  grafana_data:
