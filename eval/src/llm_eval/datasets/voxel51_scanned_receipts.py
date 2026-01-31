@@ -1,4 +1,4 @@
-# src/llm_server/eval/datasets/voxel51_scanned_receipts.py
+# src/llm_eval/datasets/voxel51_scanned_receipts.py
 from __future__ import annotations
 
 from dataclasses import dataclass

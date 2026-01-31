@@ -1,0 +1,78 @@
+{
+  "address": {
+    "city": "Anytown",
+    "state": "CA",
+    "streetAddress": "123 Main Street",
+    "zipCode": "12345"
+  },
+  "allergies": [
+    {
+      "name": "Penicillin",
+      "reaction": "Anaphylaxis",
+      "severity": "Severe"
+    },
+    {
+      "name": "Sulfa drugs",
+      "reaction": "Rash",
+      "severity": "Moderate"
+    }
+  ],
+  "dateOfBirth": "1980-01-01",
+  "diagnoses": [
+    {
+      "code": "I10",
+      "description": "Essential hypertension"
+    },
+    {
+      "code": "E11.9",
+      "description": "Type 2 diabetes mellitus without complications"
+    }
+  ],
+  "gender": "Female",
+  "immunizations": [
+    {
+      "booster": true,
+      "date": "2000-01-01",
+      "name": "MMR"
+    },
+    {
+      "booster": false,
+      "date": "2010-01-01",
+      "name": "Tdap"
+    }
+  ],
+  "medications": [
+    {
+      "dosage": "10 mg daily",
+      "frequency": "Once a day",
+      "name": "Lisinopril"
+    },
+    {
+      "dosage": "500 mg twice a day",
+      "frequency": "Twice a day",
+      "name": "Metformin"
+    }
+  ],
+  "name": "Jane Doe",
+  "patientId": "1234567890",
+  "phoneNumbers": [
+    {
+      "number": "123-456-7890",
+      "type": "Mobile"
+    },
+    {
+      "number": "987-654-3210",
+      "type": "Home"
+    }
+  ],
+  "procedures": [
+    {
+      "code": "0039T",
+      "description": "Appendectomy"
+    },
+    {
+      "code": "43210",
+      "description": "Cholecystectomy"
+    }
+  ]
+}

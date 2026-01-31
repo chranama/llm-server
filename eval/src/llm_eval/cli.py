@@ -1,4 +1,4 @@
-# src/llm_eval/cli.py
+# llm_eval/cli.py
 from __future__ import annotations
 
 import argparse
@@ -9,13 +9,8 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from llm_eval.config import dig, get_api_key, load_eval_yaml
+from llm_eval.reports.writer import render_reports_bundle
 from llm_eval.runners.base import BaseEvalRunner, EvalConfig
-
-# --- runners (current suite) ---
-from llm_eval.runners.docred_runner import GenerateDocREDRunner
-from llm_eval.runners.extraction_runner import make_extraction_runner
-from llm_eval.runners.paraloq_json_extraction_runner import GenerateParaloqJsonExtractionRunner
-from llm_eval.runners.squad_v2_runner import GenerateSquadV2Runner
 
 
 def _utc_run_id() -> str:
@@ -96,6 +91,8 @@ def _coerce_nested_payload(
     return summary, results, report_text, returned_config
 
 
+# NOTE: preserved for backwards-compatibility / minimal diff,
+# but no longer used once reports.writer is the canonical output path.
 def _fallback_report_text(task: str, run_id: str, base_url: str, summary: dict[str, Any]) -> str:
     lines: list[str] = []
     lines.append(f"task={task}")
@@ -130,24 +127,47 @@ def _fallback_report_text(task: str, run_id: str, base_url: str, summary: dict[s
     return "\n".join(lines) + "\n"
 
 
-# Map task names to runner factory functions
-TASK_FACTORIES: dict[str, Callable[[str, str, Optional[EvalConfig]], BaseEvalRunner]] = {
-    "extraction_sroie": lambda base_url, api_key, cfg: make_extraction_runner(
-        base_url=base_url, api_key=api_key, config=cfg
-    ),
-    "generate_paraloq_json_extraction": lambda base_url, api_key, cfg: GenerateParaloqJsonExtractionRunner(
-        base_url=base_url, api_key=api_key, config=cfg
-    ),
-    "generate_squad_v2": lambda base_url, api_key, cfg: GenerateSquadV2Runner(
-        base_url=base_url, api_key=api_key, config=cfg
-    ),
-    "generate_docred": lambda base_url, api_key, cfg: GenerateDocREDRunner(
-        base_url=base_url, api_key=api_key, config=cfg
-    ),
-}
+# -----------------------
+# Lazy task factories
+# -----------------------
+# Key point: DO NOT import runners at module import time.
+# Import them only inside the factory for the selected task.
+
+TaskFactory = Callable[[str, str, Optional[EvalConfig]], BaseEvalRunner]
+
+
+def _task_factories() -> dict[str, TaskFactory]:
+    def extraction_sroie(base_url: str, api_key: str, cfg: Optional[EvalConfig]) -> BaseEvalRunner:
+        from llm_eval.runners.extraction_runner import make_extraction_runner
+
+        return make_extraction_runner(base_url=base_url, api_key=api_key, config=cfg)
+
+    def generate_paraloq_json_extraction(base_url: str, api_key: str, cfg: Optional[EvalConfig]) -> BaseEvalRunner:
+        from llm_eval.runners.paraloq_json_extraction_runner import GenerateParaloqJsonExtractionRunner
+
+        return GenerateParaloqJsonExtractionRunner(base_url=base_url, api_key=api_key, config=cfg)
+
+    def generate_squad_v2(base_url: str, api_key: str, cfg: Optional[EvalConfig]) -> BaseEvalRunner:
+        from llm_eval.runners.squad_v2_runner import GenerateSquadV2Runner
+
+        return GenerateSquadV2Runner(base_url=base_url, api_key=api_key, config=cfg)
+
+    def generate_docred(base_url: str, api_key: str, cfg: Optional[EvalConfig]) -> BaseEvalRunner:
+        from llm_eval.runners.docred_runner import GenerateDocREDRunner
+
+        return GenerateDocREDRunner(base_url=base_url, api_key=api_key, config=cfg)
+
+    return {
+        "extraction_sroie": extraction_sroie,
+        "generate_paraloq_json_extraction": generate_paraloq_json_extraction,
+        "generate_squad_v2": generate_squad_v2,
+        "generate_docred": generate_docred,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
+    task_names = sorted(_task_factories().keys())
+
     parser = argparse.ArgumentParser(
         description="Run evaluation tasks against an llm-server instance.",
     )
@@ -162,7 +182,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--task",
         required=False,
-        choices=sorted(TASK_FACTORIES.keys()),
+        choices=task_names,
         help="Which evaluation task to run.",
     )
 
@@ -214,7 +234,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--print-summary",
         action="store_true",
-        help="Print the summary JSON to stdout (default: on).",
+        help="Force printing the summary JSON to stdout (default: on).",
     )
     parser.add_argument(
         "--no-print-summary",
@@ -225,7 +245,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--save",
         action="store_true",
-        help="Save summary.json and results.jsonl under results/<task>/<run_id>/ (default: on).",
+        help="Force saving summary.json and results.jsonl (default: on).",
     )
     parser.add_argument(
         "--no-save",
@@ -266,15 +286,17 @@ async def amain(argv: list[str] | None = None) -> None:
 
     cfg_yaml = load_eval_yaml(args.config)
 
+    factories = _task_factories()
+
     if args.list_tasks:
-        for t in sorted(TASK_FACTORIES.keys()):
+        for t in sorted(factories.keys()):
             print(t)
         return
 
     if not args.task:
         parser.error("--task is required (or use --list-tasks).")
 
-    if args.task not in TASK_FACTORIES:
+    if args.task not in factories:
         parser.error(f"Unknown task '{args.task}'.")
 
     enabled = dig(cfg_yaml, "datasets", args.task, "enabled", default=True)
@@ -314,11 +336,11 @@ async def amain(argv: list[str] | None = None) -> None:
 
     cfg = EvalConfig(max_examples=max_examples, model_override=model_override)
 
-    runner_factory = TASK_FACTORIES[args.task]
+    runner_factory = factories[args.task]
     runner = runner_factory(base_url, api_key, cfg)
 
     payload_any = await runner.run(max_examples=max_examples, model_override=model_override)
-    summary, results, report_text, returned_config = _coerce_nested_payload(payload_any)
+    summary, results, runner_report_text, returned_config = _coerce_nested_payload(payload_any)
 
     # Ensure task + run_id present for consistent reporting
     task_name = str(summary.get("task") or args.task)
@@ -340,10 +362,17 @@ async def amain(argv: list[str] | None = None) -> None:
         if results:
             _write_jsonl(os.path.join(outdir, "results.jsonl"), results)
 
-        # report.txt: prefer runner-provided report_text, else CLI tiny report
-        if not report_text:
-            report_text = _fallback_report_text(task_name, run_id, base_url, summary)
-        _write_text(os.path.join(outdir, "report.txt"), report_text)
+        # Canonical report outputs (writer owns fallback behavior)
+        bundle = render_reports_bundle(
+            task=task_name,
+            run_id=run_id,
+            base_url=base_url,
+            summary=summary,
+            results=results,
+            runner_report_text=runner_report_text,
+        )
+        _write_text(os.path.join(outdir, "report.txt"), bundle.text)
+        _write_text(os.path.join(outdir, "report.md"), bundle.md)
 
         if isinstance(returned_config, dict):
             _write_json(os.path.join(outdir, "config.json"), returned_config)
@@ -360,29 +389,37 @@ async def amain(argv: list[str] | None = None) -> None:
                 "doc_id",
                 "status_code",
                 "error_code",
+                "error_stage",
                 "latency_ms",
                 "metrics",
                 "predicted",
                 "predicted_text",
                 "predicted_preview",
                 "error",
+                "extra",
             ]
 
+        n_show = min(args.debug_n, len(results))
+
         print("\n" + "=" * 80)
-        print(f"DEBUG (first {min(args.debug_n, len(results))} results)")
+        print(f"DEBUG (first {n_show} results)")
         print("=" * 80)
-        for row in results[: args.debug_n]:
-            if not isinstance(row, dict):
-                continue
-            compact: dict[str, Any] = {}
-            for k in fields:
-                v = row.get(k)
-                if isinstance(v, str):
-                    compact[k] = _shorten(v, 240)
-                else:
-                    compact[k] = v
-            print(json.dumps(compact, ensure_ascii=False, indent=2))
-            print("-" * 80)
+
+        if not results:
+            print("(no per-example results returned)")
+        else:
+            for row in results[: args.debug_n]:
+                if not isinstance(row, dict):
+                    continue
+                compact: dict[str, Any] = {}
+                for k in fields:
+                    v = row.get(k)
+                    if isinstance(v, str):
+                        compact[k] = _shorten(v, 240)
+                    else:
+                        compact[k] = v
+                print(json.dumps(compact, ensure_ascii=False, indent=2))
+                print("-" * 80)
 
     if do_print:
         print(json.dumps(summary, ensure_ascii=False, indent=2))

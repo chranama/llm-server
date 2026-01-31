@@ -1,0 +1,57 @@
+[project]
+name = "llm_platform"
+version = "0.1.0"
+description = "Repo-level CLI and workflows for llm-extraction-platform"
+requires-python = "==3.12.*"
+dependencies = [
+  "typer>=0.12",
+  "rich>=13.7",
+  "python-dotenv>=1.0.0",
+
+  # ✅ pull in the local subprojects (must match each subproject's [project].name)
+  "llm_server",
+  "llm_eval",
+  "llm_policy",
+]
+
+[project.scripts]
+llmctl = "cli.main:main"
+
+# Optional: re-expose subpackage CLIs
+llm = "llm_server.cli:main"
+eval = "llm_eval.cli:main"
+llm-policy = "llm_policy.cli:main"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "ruff>=0.5",
+  "black>=24",
+]
+
+[tool.uv]
+package = true
+
+# ✅ map dependency-name -> local path
+[tool.uv.sources]
+llm_server = { path = "backend", editable = true }
+llm_eval   = { path = "eval", editable = true }
+llm_policy = { path = "policy", editable = true }
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cli*"]
+exclude = ["backend*", "eval*", "policy*", "tools*", "deploy*", "integrations*", "ui*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+fix = true
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]

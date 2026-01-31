@@ -5,10 +5,11 @@ import {
   callGenerate,
   listSchemas,
   getSchema,
-  getCapabilities,
+  listModels,
   ApiError,
   SchemaIndexItem,
   JsonSchema,
+  ModelsResponseBody,
   CapabilitiesResponseBody,
 } from "../../lib/api";
 
@@ -22,8 +23,60 @@ import { ExtractPanel } from "./ExtractPanel";
 import { GeneratePanel } from "./GeneratePanel";
 import { SchemaInspector } from "./SchemaInspector";
 
+function ModelsCapsTable({ models }: { models: ModelsResponseBody }) {
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div style={{ fontWeight: 800, marginBottom: 6 }}>Models</div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+          <thead>
+            <tr style={{ textAlign: "left" }}>
+              <th style={{ padding: "6px 8px", borderBottom: "1px solid #e2e8f0" }}>Model</th>
+              <th style={{ padding: "6px 8px", borderBottom: "1px solid #e2e8f0" }}>Default</th>
+              <th style={{ padding: "6px 8px", borderBottom: "1px solid #e2e8f0" }}>Backend</th>
+              <th style={{ padding: "6px 8px", borderBottom: "1px solid #e2e8f0" }}>Generate</th>
+              <th style={{ padding: "6px 8px", borderBottom: "1px solid #e2e8f0" }}>Extract</th>
+              <th style={{ padding: "6px 8px", borderBottom: "1px solid #e2e8f0" }}>Load mode</th>
+              <th style={{ padding: "6px 8px", borderBottom: "1px solid #e2e8f0" }}>Loaded</th>
+            </tr>
+          </thead>
+          <tbody>
+            {models.models.map((m) => {
+              const caps = m.capabilities || {};
+              return (
+                <tr key={m.id}>
+                  <td style={{ padding: "6px 8px", borderBottom: "1px solid #f1f5f9", fontFamily: "monospace" }}>
+                    {m.id}
+                  </td>
+                  <td style={{ padding: "6px 8px", borderBottom: "1px solid #f1f5f9" }}>
+                    {m.default ? "✅" : ""}
+                  </td>
+                  <td style={{ padding: "6px 8px", borderBottom: "1px solid #f1f5f9" }}>
+                    {m.backend ?? ""}
+                  </td>
+                  <td style={{ padding: "6px 8px", borderBottom: "1px solid #f1f5f9" }}>
+                    {caps.generate ? "✅" : "—"}
+                  </td>
+                  <td style={{ padding: "6px 8px", borderBottom: "1px solid #f1f5f9" }}>
+                    {caps.extract ? "✅" : "—"}
+                  </td>
+                  <td style={{ padding: "6px 8px", borderBottom: "1px solid #f1f5f9" }}>
+                    {m.load_mode ?? ""}
+                  </td>
+                  <td style={{ padding: "6px 8px", borderBottom: "1px solid #f1f5f9" }}>
+                    {m.loaded === true ? "✅" : m.loaded === false ? "—" : ""}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 export function Playground() {
-  // Default to Generate so we don't flash an Extract UI that may be disabled.
   const [mode, setMode] = useState<Mode>("generate");
 
   const [loading, setLoading] = useState(false);
@@ -38,38 +91,49 @@ export function Playground() {
   };
 
   // -----------------------------
-  // Capabilities gating
+  // Models + deployment capabilities
   // -----------------------------
-  const [caps, setCaps] = useState<CapabilitiesResponseBody | null>(null);
+  const [modelsResp, setModelsResp] = useState<ModelsResponseBody | null>(null);
+  const [modelsErr, setModelsErr] = useState<string | null>(null);
+
+  const caps: CapabilitiesResponseBody | null = useMemo(() => {
+    if (!modelsResp) return null;
+    return modelsResp.deployment_capabilities;
+  }, [modelsResp]);
+
   const extractEnabled = caps?.extract === true;
 
   useEffect(() => {
     let canceled = false;
 
-    async function loadCaps() {
+    async function loadModels() {
       try {
-        const c = await getCapabilities();
+        const r = await listModels();
         if (canceled) return;
-
-        setCaps({
-          generate: Boolean((c as any)?.generate),
-          extract: Boolean((c as any)?.extract),
-        });
-      } catch {
+        setModelsResp(r);
+        setModelsErr(null);
+      } catch (e: any) {
         if (canceled) return;
-        // Safe fallback: generate-only UI
-        setCaps({ generate: true, extract: false });
+        setModelsResp(null);
+        setModelsErr(e?.message ?? "Failed to load /v1/models");
       }
     }
 
-    loadCaps();
-
+    loadModels();
     return () => {
       canceled = true;
     };
   }, []);
 
-  // If Extract is disabled, never allow the Extract tab to remain selected.
+  // Default tab selection: Extract if enabled, else Generate
+  useEffect(() => {
+    if (!caps) return;
+    setMode(caps.extract ? "extract" : "generate");
+    // If extract disabled, clear extract error (avoid stale)
+    if (!caps.extract) setExtractError(null);
+  }, [caps]);
+
+  // If Extract becomes disabled, force Generate
   useEffect(() => {
     if (caps && !extractEnabled && mode === "extract") {
       setMode("generate");
@@ -91,7 +155,7 @@ export function Playground() {
   const [schemaJsonLoading, setSchemaJsonLoading] = useState(false);
   const [schemaJsonError, setSchemaJsonError] = useState<string | null>(null);
 
-  // Extract
+  // Extract state
   const [schemaId, setSchemaId] = useState<string>("");
   const [extractText, setExtractText] = useState<string>(
     "Company: ACME Corp\nDate: 2024-01-01\nTotal: $12.34\nAddress: 123 Main St, Springfield"
@@ -108,7 +172,7 @@ export function Playground() {
   const [autoBaseline, setAutoBaseline] = useState<boolean>(true);
   const [diffShowUnchanged, setDiffShowUnchanged] = useState<boolean>(false);
 
-  // Generate
+  // Generate state
   const [prompt, setPrompt] = useState("Write a haiku about autumn leaves.");
   const [genOutput, setGenOutput] = useState("");
   const [modelOverride, setModelOverride] = useState<string>("");
@@ -124,7 +188,6 @@ export function Playground() {
   }, [copyMsg]);
 
   async function loadSchemasOnce() {
-    // Only load schemas if Extract is enabled
     if (!extractEnabled) return;
 
     setSchemasLoading(true);
@@ -144,9 +207,9 @@ export function Playground() {
     }
   }
 
-  // Load schemas once *after* we know extract is enabled
+  // Load schemas once after we know extract is enabled
   useEffect(() => {
-    if (!caps) return; // wait for capabilities
+    if (!caps) return;
     if (!extractEnabled) return;
 
     let canceled = false;
@@ -161,7 +224,7 @@ export function Playground() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [caps, extractEnabled]);
 
-  // Load schema json when schemaId changes (extract-only)
+  // Load schema JSON when schemaId changes
   useEffect(() => {
     if (!extractEnabled) return;
 
@@ -305,7 +368,7 @@ export function Playground() {
         border: active ? "1px solid #2563eb" : "1px solid #cbd5f5",
         background: active ? "#2563eb" : "white",
         color: active ? "white" : "#0f172a",
-        fontWeight: 600,
+        fontWeight: 700,
         cursor: disabled ? "not-allowed" : loading ? "wait" : "pointer",
         opacity: disabled ? 0.55 : 1,
       }}
@@ -399,7 +462,9 @@ export function Playground() {
     ? extractEnabled
       ? ""
       : "Extract is disabled in this deployment."
-    : "Loading capabilities…";
+    : modelsErr
+      ? modelsErr
+      : "Loading deployment capabilities…";
 
   return (
     <div style={{ maxWidth: 1180 }}>
@@ -429,7 +494,7 @@ export function Playground() {
               border: "1px solid #cbd5f5",
               background: "#f1f5f9",
               color: "#0f172a",
-              fontWeight: 600,
+              fontWeight: 700,
             }}
           >
             {copyMsg}
@@ -437,13 +502,13 @@ export function Playground() {
         )}
 
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <label style={{ fontWeight: 500, color: "#334155" }}>Model</label>
+          <label style={{ fontWeight: 600, color: "#334155" }}>Model</label>
           <input
             value={modelOverride}
             onChange={(e) => setModelOverride(e.target.value)}
             placeholder="(optional override)"
             style={{
-              width: 240,
+              width: 280,
               padding: "8px 10px",
               borderRadius: 10,
               border: "1px solid #cbd5f5",
@@ -453,22 +518,56 @@ export function Playground() {
         </div>
       </div>
 
-      {/* Optional hint when extract is disabled */}
+      {/* Better disabled UX */}
       {caps && !extractEnabled && (
         <div
           style={{
             marginBottom: 12,
-            padding: "10px 12px",
+            padding: "12px 12px",
             borderRadius: 12,
             border: "1px solid #cbd5f5",
             background: "#f8fafc",
             color: "#0f172a",
           }}
         >
-          <div style={{ fontWeight: 700, marginBottom: 4 }}>Extraction disabled</div>
+          <div style={{ fontWeight: 900, marginBottom: 6 }}>Extraction disabled</div>
           <div style={{ fontSize: 13, color: "#334155" }}>
-            This deployment has <span style={{ fontWeight: 700 }}>extract disabled</span>. Generate remains available.
+            This deployment is advertising <code>extract=false</code>.
+            {modelsResp?.default_model ? (
+              <>
+                {" "}Default model is <code>{modelsResp.default_model}</code>.
+              </>
+            ) : null}
           </div>
+
+          <div style={{ marginTop: 8, fontSize: 13, color: "#334155" }}>
+            <div style={{ fontWeight: 800, marginBottom: 4 }}>How to enable it</div>
+            <ol style={{ margin: 0, paddingLeft: 18 }}>
+              <li>Run <code>llm_eval</code> against this deployment to produce <code>summary.json</code>.</li>
+              <li>Run <code>llm_policy decide-and-patch</code> to set <code>capabilities.extract=true</code> for a model.</li>
+              <li>Restart backend (or hot-reload models config if you support it).</li>
+            </ol>
+          </div>
+
+          {modelsResp && <ModelsCapsTable models={modelsResp} />}
+        </div>
+      )}
+
+      {/* If /v1/models failed */}
+      {!caps && modelsErr && (
+        <div
+          style={{
+            marginBottom: 12,
+            padding: "12px 12px",
+            borderRadius: 12,
+            border: "1px solid #fecaca",
+            background: "#fff1f2",
+            color: "#991b1b",
+            whiteSpace: "pre-wrap",
+          }}
+        >
+          <div style={{ fontWeight: 900, marginBottom: 4 }}>Unable to load deployment capabilities</div>
+          {modelsErr}
         </div>
       )}
 

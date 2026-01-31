@@ -1,4 +1,4 @@
-# src/llm_server/eval/datasets/paraloq_json_extraction.py
+# src/llm_eval/datasets/paraloq_json_extraction.py
 
 from datasets import load_dataset
 from typing import Iterator, Dict, Any

@@ -1,0 +1,1 @@
+Return a short JSON object with exactly one key "ok" and value true.

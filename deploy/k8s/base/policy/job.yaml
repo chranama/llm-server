@@ -1,0 +1,109 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: policy-gate
+  namespace: llm
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      serviceAccountName: policy-runner
+      restartPolicy: Never
+
+      volumes:
+        - name: work
+          emptyDir: {}
+
+        # Read-only models yaml
+        - name: models
+          configMap:
+            name: llm-models
+
+        # Eval artifacts location (see note below)
+        - name: results
+          emptyDir: {}
+
+      initContainers:
+        - name: run-policy
+          image: llm-policy:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MODELS_FILE_KEY
+              value: "models.yaml"
+
+            # Policy inputs
+            - name: POLICY_RUN_DIR
+              value: "/results/run"
+            - name: POLICY_MODEL_ID
+              value: "meta-llama/Llama-3.2-1B-Instruct"
+            - name: POLICY_THRESHOLD_PROFILE
+              value: "extract/default"
+            - name: POLICY_THRESHOLDS_ROOT
+              value: "/app/policy/src/llm_policy/thresholds"
+
+          command: ["/bin/sh", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+
+              echo "[policy] copy models.yaml from configmap mount..."
+              test -f "/in/${MODELS_FILE_KEY}"
+              cp "/in/${MODELS_FILE_KEY}" /work/models.yaml
+
+              echo "[policy] run decide-and-patch..."
+              llm-policy decide-and-patch \
+                --run-dir "${POLICY_RUN_DIR}" \
+                --models-yaml /work/models.yaml \
+                --model-id "${POLICY_MODEL_ID}" \
+                --threshold-profile "${POLICY_THRESHOLD_PROFILE}" \
+                --thresholds-root "${POLICY_THRESHOLDS_ROOT}" \
+                --format text
+
+              echo "[policy] patched file:"
+              head -n 40 /work/models.yaml
+
+          volumeMounts:
+            - name: models
+              mountPath: /in
+              readOnly: true
+            - name: work
+              mountPath: /work
+            - name: results
+              mountPath: /results
+
+      containers:
+        - name: apply-configmap
+          image: bitnami/kubectl:1.30
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MODELS_CONFIGMAP_NAME
+              value: "llm-models"
+            - name: MODELS_FILE_KEY
+              value: "models.yaml"
+
+            - name: API_DEPLOYMENT_NAME
+              value: "api"
+            - name: ROLLOUT_RESTART_API
+              value: "1"
+
+          command: ["/bin/sh", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+
+              echo "[kubectl] update configmap/${MODELS_CONFIGMAP_NAME} from patched file..."
+              kubectl -n llm create configmap "${MODELS_CONFIGMAP_NAME}" \
+                --from-file="${MODELS_FILE_KEY}=/work/models.yaml" \
+                -o yaml --dry-run=client \
+              | kubectl -n llm apply -f -
+
+              if [ "${ROLLOUT_RESTART_API}" = "1" ]; then
+                echo "[kubectl] rollout restart deployment/${API_DEPLOYMENT_NAME}..."
+                kubectl -n llm rollout restart "deployment/${API_DEPLOYMENT_NAME}"
+              fi
+
+              echo "[kubectl] done."
+
+          volumeMounts:
+            - name: work
+              mountPath: /work

@@ -1,0 +1,22 @@
+{
+  "appointment": {
+    "date": "2023-03-08",
+    "doctor": {
+      "id": "3f27879b-9b6f-4a51-81d0-357e30e92974",
+      "name": "Dr. John Smith",
+      "speciality": "Cardiology"
+    },
+    "id": "9316b131-d808-484e-9d56-0145e99f3c36",
+    "notes": "Patient has been experiencing chest pain and shortness of breath.",
+    "patient": {
+      "address": "123 Main Street, Anytown, CA 91234",
+      "email": "janedoe@example.com",
+      "id": "5573200d-9f53-4e64-b1fb-c6c34cd3e1bb",
+      "name": "Jane Doe",
+      "phone": "555-123-4567"
+    },
+    "reason": "Annual checkup",
+    "status": "SCHEDULED",
+    "time": "10:00"
+  }
+}

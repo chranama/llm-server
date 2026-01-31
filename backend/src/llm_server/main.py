@@ -15,6 +15,7 @@ from llm_server.core import metrics, limits
 from llm_server.core import errors
 from llm_server.core.redis import init_redis, close_redis
 from llm_server.services.llm import build_llm_from_settings
+from llm_server.services.policy_decisions import load_policy_decision_from_env
 
 
 def _effective_model_load_mode(settings: Any) -> str:
@@ -64,6 +65,26 @@ async def lifespan(app: FastAPI):
     # Freeze settings for this app instance (single source of truth)
     s = getattr(app.state, "settings", None) or get_settings()
     app.state.settings = s
+    
+	# --------------------
+    # Policy snapshot startup (frozen for this process unless admin reloads)
+    # --------------------
+    try:
+        snap = load_policy_decision_from_env()
+        app.state.policy_snapshot = snap
+
+        logging.getLogger("uvicorn.error").info(
+            "policy: ok=%s source=%s model_id=%s enable_extract=%s error=%s",
+            getattr(snap, "ok", None),
+            getattr(snap, "source_path", None),
+            getattr(snap, "model_id", None),
+            getattr(snap, "enable_extract", None),
+            getattr(snap, "error", None),
+        )
+    except Exception as e:
+        # Extremely defensive: policy loader should never crash startup.
+        app.state.policy_snapshot = None
+        logging.getLogger("uvicorn.error").exception("Policy snapshot init failed (continuing): %s", e)
 
     mode = _effective_model_load_mode(s)
 

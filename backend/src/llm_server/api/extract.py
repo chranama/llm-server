@@ -253,6 +253,14 @@ def _failure_stage_for_app_error(e: AppError, *, is_repair: bool) -> str | None:
     return "repair_validate" if is_repair else "validate"
 
 
+def _set_stage(request: Request, stage: str) -> None:
+    # Used by core/errors.py safety net too
+    try:
+        request.state.error_stage = stage
+    except Exception:
+        pass
+
+
 @router.get("/v1/schemas")
 async def schemas_index(api_key=Depends(get_api_key)):
     return [{"schema_id": s.schema_id, "title": s.title, "description": s.description} for s in list_schemas()]
@@ -287,196 +295,267 @@ async def extract(
     api_key=Depends(get_api_key),
     llm: Any = Depends(get_llm),
 ):
-    model_id, model = resolve_model(llm, body.model, capability="extract", request=request)
-
-    # Single enforcement path: deployment gate + per-model gate
-    require_capability(model_id, "extract", request=request)
-
-    set_request_meta(request, route="/v1/extract", model_id=model_id, cached=False)
-
-    request_id = getattr(request.state, "request_id", None)
-
-    EXTRACTION_REQUESTS.labels(schema_id=body.schema_id, model_id=model_id).inc()
-
-    try:
-        schema = load_schema(body.schema_id)
-    except SchemaNotFoundError as e:
-        raise AppError(
-            code=e.code,
-            message=e.message,
-            status_code=status.HTTP_404_NOT_FOUND,
-            extra={"schema_id": e.schema_id},
-        ) from e
-    except SchemaLoadError as e:
-        raise AppError(
-            code=e.code,
-            message=e.message,
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            extra={"schema_id": e.schema_id},
-        ) from e
-
-    prompt_hash = sha32(f"{body.schema_id}\n{body.text}")
-    params_fp = fingerprint_pydantic(body, exclude={"text", "model", "cache", "repair"})
-    redis_key = make_extract_redis_key(model_id, prompt_hash, params_fp)
-
-    cache = CacheSpec(
-        model_id=model_id,
-        prompt=body.text,
-        prompt_hash=prompt_hash,
-        params_fp=params_fp,
-        redis_key=redis_key,
-        redis_ttl_seconds=REDIS_TTL_SECONDS,
-    )
+    """
+    Key principle: every failure should be classifiable.
+    If we hit an unexpected exception, we wrap it as AppError with `extra.stage`.
+    """
+    stage = "start"
+    _set_stage(request, stage)
 
     start = time.time()
-    redis = get_redis_from_request(request)
+    request_id = getattr(request.state, "request_id", None)
 
-    async with db_session.get_sessionmaker()() as session:
-        # ---- cache read (redis -> db), stored as JSON string in CompletionCache.output ----
-        cached_out, cached_flag, layer = await get_cached_output(
-            session,
-            redis,
-            cache=cache,
-            kind="single",
-            enabled=bool(body.cache),
-        )
+    try:
+        stage = "resolve_model"
+        _set_stage(request, stage)
+        model_id, model = resolve_model(llm, body.model, capability="extract", request=request)
 
-        if isinstance(cached_out, str) and cached_flag:
-            data: dict[str, Any] | None
-            try:
-                data_obj = json.loads(cached_out)
-                if not isinstance(data_obj, dict):
-                    raise ValueError("Expected object")
-                validate_jsonschema(schema, data_obj)
-                data = data_obj
-            except DependencyMissingError as e:
-                raise AppError(code=e.code, message=e.message, status_code=500) from e
-            except (JSONSchemaValidationError, Exception):
-                data = None
+        stage = "require_capability"
+        _set_stage(request, stage)
+        require_capability(model_id, "extract", request=request)
 
-            if isinstance(data, dict):
-                EXTRACTION_CACHE_HITS.labels(
-                    schema_id=body.schema_id,
-                    model_id=model_id,
-                    layer=(layer or "db"),
-                ).inc()
+        set_request_meta(request, route="/v1/extract", model_id=model_id, cached=False)
 
-                request.state.cached = True
-                latency_ms = (time.time() - start) * 1000
+        EXTRACTION_REQUESTS.labels(schema_id=body.schema_id, model_id=model_id).inc()
 
-                await write_inference_log(
-                    session,
-                    api_key=api_key.key,
-                    request_id=request_id,
-                    route="/v1/extract",
-                    client_host=request.client.host if request.client else None,
-                    model_id=model_id,
-                    params_json={"schema_id": body.schema_id, "cache": True, "repair": body.repair},
-                    prompt=body.text,
-                    output=json.dumps(data, ensure_ascii=False),
-                    latency_ms=latency_ms,
-                    prompt_tokens=None,
-                    completion_tokens=None,
-                    commit=True,
-                )
-
-                return ExtractResponse(
-                    schema_id=body.schema_id,
-                    model=model_id,
-                    data=data,
-                    cached=True,
-                    repair_attempted=False,
-                )
-
-        # ---- run model ----
-        prompt = _build_extraction_prompt(body.schema_id, schema, body.text)
-        result = model.generate(
-            prompt=prompt,
-            max_new_tokens=body.max_new_tokens,
-            temperature=body.temperature,
-        )
-        output = result if isinstance(result, str) else str(result)
-
-        repair_attempted = False
-
+        stage = "load_schema"
+        _set_stage(request, stage)
         try:
-            data = _validate_first_matching(schema, output)
-        except AppError as e:
-            stage = _failure_stage_for_app_error(e, is_repair=False)
-            if stage is not None:
-                EXTRACTION_VALIDATION_FAILURES.labels(schema_id=body.schema_id, model_id=model_id, stage=stage).inc()
+            schema = load_schema(body.schema_id)
+        except SchemaNotFoundError as e:
+            raise AppError(
+                code=e.code,
+                message=e.message,
+                status_code=status.HTTP_404_NOT_FOUND,
+                extra={"schema_id": e.schema_id, "stage": "load_schema"},
+            ) from e
+        except SchemaLoadError as e:
+            raise AppError(
+                code=e.code,
+                message=e.message,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                extra={"schema_id": e.schema_id, "stage": "load_schema"},
+            ) from e
 
-            if not body.repair:
-                raise
+        stage = "build_cache_keys"
+        _set_stage(request, stage)
+        prompt_hash = sha32(f"{body.schema_id}\n{body.text}")
+        params_fp = fingerprint_pydantic(body, exclude={"text", "model", "cache", "repair"})
+        redis_key = make_extract_redis_key(model_id, prompt_hash, params_fp)
 
-            repair_attempted = True
-            EXTRACTION_REPAIR.labels(schema_id=body.schema_id, model_id=model_id, outcome="attempted").inc()
-
-            error_hint = json.dumps(
-                {"code": e.code, "message": e.message, **(e.extra or {})},
-                ensure_ascii=False,
-            )
-
-            repair_prompt = _build_repair_prompt(
-                body.schema_id,
-                schema,
-                body.text,
-                bad_output=output,
-                error_hint=error_hint,
-            )
-            repair_result = model.generate(
-                prompt=repair_prompt,
-                max_new_tokens=body.max_new_tokens,
-                temperature=0.0,
-            )
-            repaired = repair_result if isinstance(repair_result, str) else str(repair_result)
-
-            try:
-                data = _validate_first_matching(schema, repaired)
-                EXTRACTION_REPAIR.labels(schema_id=body.schema_id, model_id=model_id, outcome="success").inc()
-            except AppError as e2:
-                stage2 = _failure_stage_for_app_error(e2, is_repair=True)
-                if stage2 is not None:
-                    EXTRACTION_VALIDATION_FAILURES.labels(
-                        schema_id=body.schema_id, model_id=model_id, stage=stage2
-                    ).inc()
-                EXTRACTION_REPAIR.labels(schema_id=body.schema_id, model_id=model_id, outcome="failure").inc()
-                raise
-
-        latency_ms = (time.time() - start) * 1000
-        request.state.cached = False
-
-        # ---- cache write: store JSON string in CompletionCache.output, and {"output": "..."} in Redis ----
-        out_json = json.dumps(data, ensure_ascii=False)
-        await write_cache(
-            session,
-            redis,
-            cache=cache,
-            output=out_json,
-            enabled=bool(body.cache),
-        )
-
-        # ---- log ----
-        await write_inference_log(
-            session,
-            api_key=api_key.key,
-            request_id=request_id,
-            route="/v1/extract",
-            client_host=request.client.host if request.client else None,
+        cache = CacheSpec(
             model_id=model_id,
-            params_json={"schema_id": body.schema_id, "cache": body.cache, "repair": body.repair},
             prompt=body.text,
-            output=out_json,
-            latency_ms=latency_ms,
-            prompt_tokens=None,
-            completion_tokens=None,
-            commit=True,
+            prompt_hash=prompt_hash,
+            params_fp=params_fp,
+            redis_key=redis_key,
+            redis_ttl_seconds=REDIS_TTL_SECONDS,
         )
 
-        return ExtractResponse(
-            schema_id=body.schema_id,
-            model=model_id,
-            data=data,
-            cached=False,
-            repair_attempted=repair_attempted,
-        )
+        stage = "redis_get"
+        _set_stage(request, stage)
+        redis = get_redis_from_request(request)
+
+        # -------------------------
+        # DB session + cache read
+        # -------------------------
+        stage = "db_session_open"
+        _set_stage(request, stage)
+
+        async with db_session.get_sessionmaker()() as session:
+            stage = "cache_read"
+            _set_stage(request, stage)
+            cached_out, cached_flag, layer = await get_cached_output(
+                session,
+                redis,
+                cache=cache,
+                kind="single",
+                enabled=bool(body.cache),
+            )
+
+            if isinstance(cached_out, str) and cached_flag:
+                stage = "cache_validate"
+                _set_stage(request, stage)
+                data: dict[str, Any] | None
+                try:
+                    data_obj = json.loads(cached_out)
+                    if not isinstance(data_obj, dict):
+                        raise ValueError("Expected object")
+                    validate_jsonschema(schema, data_obj)
+                    data = data_obj
+                except DependencyMissingError as e:
+                    raise AppError(code=e.code, message=e.message, status_code=500, extra={"stage": stage}) from e
+                except (JSONSchemaValidationError, Exception):
+                    data = None
+
+                if isinstance(data, dict):
+                    EXTRACTION_CACHE_HITS.labels(
+                        schema_id=body.schema_id,
+                        model_id=model_id,
+                        layer=(layer or "db"),
+                    ).inc()
+
+                    request.state.cached = True
+                    latency_ms = (time.time() - start) * 1000
+
+                    stage = "log_cached"
+                    _set_stage(request, stage)
+                    await write_inference_log(
+                        session,
+                        api_key=api_key.key,
+                        request_id=request_id,
+                        route="/v1/extract",
+                        client_host=request.client.host if request.client else None,
+                        model_id=model_id,
+                        params_json={"schema_id": body.schema_id, "cache": True, "repair": body.repair},
+                        prompt=body.text,
+                        output=json.dumps(data, ensure_ascii=False),
+                        latency_ms=latency_ms,
+                        prompt_tokens=None,
+                        completion_tokens=None,
+                        commit=True,
+                    )
+
+                    return ExtractResponse(
+                        schema_id=body.schema_id,
+                        model=model_id,
+                        data=data,
+                        cached=True,
+                        repair_attempted=False,
+                    )
+
+            # -------------
+            # Run model
+            # -------------
+            stage = "build_prompt"
+            _set_stage(request, stage)
+            prompt = _build_extraction_prompt(body.schema_id, schema, body.text)
+
+            stage = "model_generate"
+            _set_stage(request, stage)
+            result = model.generate(
+                prompt=prompt,
+                max_new_tokens=body.max_new_tokens,
+                temperature=body.temperature,
+            )
+            output = result if isinstance(result, str) else str(result)
+
+            repair_attempted = False
+
+            stage = "validate_output"
+            _set_stage(request, stage)
+            try:
+                data = _validate_first_matching(schema, output)
+            except AppError as e:
+                st = _failure_stage_for_app_error(e, is_repair=False)
+                if st is not None:
+                    EXTRACTION_VALIDATION_FAILURES.labels(schema_id=body.schema_id, model_id=model_id, stage=st).inc()
+
+                if not body.repair:
+                    # Preserve stage signal for eval/policy
+                    if isinstance(e.extra, dict):
+                        e.extra.setdefault("stage", st or "validate_output")
+                    else:
+                        e.extra = {"stage": st or "validate_output"}  # type: ignore[assignment]
+                    raise
+
+                repair_attempted = True
+                EXTRACTION_REPAIR.labels(schema_id=body.schema_id, model_id=model_id, outcome="attempted").inc()
+
+                stage = "repair_prompt"
+                _set_stage(request, stage)
+                error_hint = json.dumps(
+                    {"code": e.code, "message": e.message, **(e.extra or {})},
+                    ensure_ascii=False,
+                )
+
+                repair_prompt = _build_repair_prompt(
+                    body.schema_id,
+                    schema,
+                    body.text,
+                    bad_output=output,
+                    error_hint=error_hint,
+                )
+
+                stage = "repair_generate"
+                _set_stage(request, stage)
+                repair_result = model.generate(
+                    prompt=repair_prompt,
+                    max_new_tokens=body.max_new_tokens,
+                    temperature=0.0,
+                )
+                repaired = repair_result if isinstance(repair_result, str) else str(repair_result)
+
+                stage = "repair_validate"
+                _set_stage(request, stage)
+                try:
+                    data = _validate_first_matching(schema, repaired)
+                    EXTRACTION_REPAIR.labels(schema_id=body.schema_id, model_id=model_id, outcome="success").inc()
+                except AppError as e2:
+                    st2 = _failure_stage_for_app_error(e2, is_repair=True)
+                    if st2 is not None:
+                        EXTRACTION_VALIDATION_FAILURES.labels(
+                            schema_id=body.schema_id, model_id=model_id, stage=st2
+                        ).inc()
+                    EXTRACTION_REPAIR.labels(schema_id=body.schema_id, model_id=model_id, outcome="failure").inc()
+
+                    if isinstance(e2.extra, dict):
+                        e2.extra.setdefault("stage", st2 or "repair_validate")
+                    else:
+                        e2.extra = {"stage": st2 or "repair_validate"}  # type: ignore[assignment]
+                    raise
+
+            latency_ms = (time.time() - start) * 1000
+            request.state.cached = False
+
+            # -------------------------
+            # Cache write + log
+            # -------------------------
+            stage = "cache_write"
+            _set_stage(request, stage)
+            out_json = json.dumps(data, ensure_ascii=False)
+            await write_cache(
+                session,
+                redis,
+                cache=cache,
+                output=out_json,
+                enabled=bool(body.cache),
+            )
+
+            stage = "log_uncached"
+            _set_stage(request, stage)
+            await write_inference_log(
+                session,
+                api_key=api_key.key,
+                request_id=request_id,
+                route="/v1/extract",
+                client_host=request.client.host if request.client else None,
+                model_id=model_id,
+                params_json={"schema_id": body.schema_id, "cache": body.cache, "repair": body.repair},
+                prompt=body.text,
+                output=out_json,
+                latency_ms=latency_ms,
+                prompt_tokens=None,
+                completion_tokens=None,
+                commit=True,
+            )
+
+            return ExtractResponse(
+                schema_id=body.schema_id,
+                model=model_id,
+                data=data,
+                cached=False,
+                repair_attempted=repair_attempted,
+            )
+
+    except AppError:
+        raise
+    except Exception as e:
+        # Wrap unknowns so eval can classify them deterministically.
+        # Do NOT leak details; preserve only type + stage.
+        raise AppError(
+            code="internal_error",
+            message="An unexpected error occurred",
+            status_code=500,
+            extra={"stage": stage, "exc_type": type(e).__name__},
+        ) from e

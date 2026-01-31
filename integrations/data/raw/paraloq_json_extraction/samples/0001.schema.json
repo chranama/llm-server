@@ -1,0 +1,176 @@
+{
+  "$defs": {
+    "Medication": {
+      "properties": {
+        "dosage": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "instructions": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "medicationId": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "refills": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "units": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "medicationId",
+        "name",
+        "dosage",
+        "units",
+        "instructions",
+        "refills"
+      ],
+      "type": "object"
+    },
+    "Patient": {
+      "properties": {
+        "dateOfBirth": {
+          "format": "date",
+          "type": "string"
+        },
+        "firstName": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "gender": {
+          "enum": [
+            "male",
+            "female",
+            "other"
+          ],
+          "type": "string"
+        },
+        "lastName": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "medicalConditions": {
+          "items": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "patientId": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "patientId",
+        "firstName",
+        "lastName",
+        "dateOfBirth",
+        "gender"
+      ],
+      "type": "object"
+    },
+    "Pharmacy": {
+      "properties": {
+        "address": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "pharmacyId": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "phone": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "pharmacyId",
+        "name",
+        "address"
+      ],
+      "type": "object"
+    },
+    "Prescription": {
+      "properties": {
+        "dateExpires": {
+          "format": "date",
+          "type": "string"
+        },
+        "datePrescribed": {
+          "format": "date",
+          "type": "string"
+        },
+        "medication": {
+          "$ref": "#/$defs/Medication"
+        },
+        "patient": {
+          "$ref": "#/$defs/Patient"
+        },
+        "pharmacy": {
+          "$ref": "#/$defs/Pharmacy"
+        },
+        "prescriptionId": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "active",
+            "inactive",
+            "expired"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "prescriptionId",
+        "patient",
+        "medication",
+        "pharmacy",
+        "datePrescribed"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "prescription": {
+      "$ref": "#/$defs/Prescription"
+    }
+  },
+  "required": [
+    "prescription"
+  ],
+  "type": "object"
+}

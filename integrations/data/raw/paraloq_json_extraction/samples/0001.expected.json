@@ -1,0 +1,33 @@
+{
+  "prescription": {
+    "dateExpires": "2023-09-07",
+    "datePrescribed": "2023-03-08",
+    "medication": {
+      "dosage": 200,
+      "instructions": "Inhale 2 puffs every 4-6 hours as needed for shortness of breath.",
+      "medicationId": "MD123456",
+      "name": "Albuterol",
+      "refills": 3,
+      "units": "mcg"
+    },
+    "patient": {
+      "dateOfBirth": "1980-01-01",
+      "firstName": "Jane",
+      "gender": "female",
+      "lastName": "Doe",
+      "medicalConditions": [
+        "Asthma",
+        "Hypertension"
+      ],
+      "patientId": "PT123456"
+    },
+    "pharmacy": {
+      "address": "123 Main Street, Anytown, CA 12345",
+      "name": "CVS Pharmacy",
+      "pharmacyId": "PH123456",
+      "phone": "(123) 456-7890"
+    },
+    "prescriptionId": "RX123456",
+    "status": "active"
+  }
+}

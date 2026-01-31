@@ -1,9 +1,9 @@
-# llm_eval/client/http_client.py
+# eval/src/llm_eval/client/http_client.py
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import httpx
 
@@ -58,8 +58,11 @@ class HttpEvalClient:
 
     Notes:
     - Never raises for HTTP errors: callers get GenerateErr / ExtractErr.
-    - Reuses a single AsyncClient noted in self._client for connection pooling.
-      Call .aclose() if you create a long-lived client (optional).
+    - Captures classification-friendly metadata in `.extra` on errors:
+        - stage
+        - content_type
+        - request_id (from header or body)
+        - response_text preview (safe, truncated)
     """
 
     def __init__(
@@ -77,7 +80,6 @@ class HttpEvalClient:
         return {"X-API-Key": self.api_key}
 
     def _get_client(self) -> httpx.AsyncClient:
-        # Lazily create one client to avoid recreating TCP connections per request.
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=self.timeout)
         return self._client
@@ -88,24 +90,24 @@ class HttpEvalClient:
             self._client = None
 
     @staticmethod
-    def _safe_json(resp: httpx.Response) -> Any:
+    def _shorten(s: str, n: int = 2000) -> str:
+        s = (s or "").strip()
+        if len(s) <= n:
+            return s
+        return s[: n - 3] + "..."
+
+    @staticmethod
+    def _safe_json(resp: httpx.Response) -> Tuple[Any, Optional[str]]:
+        """
+        Returns (json_obj, json_error_str_or_None)
+        """
         try:
-            return resp.json()
-        except Exception:
-            return None
+            return resp.json(), None
+        except Exception as e:
+            return None, f"{type(e).__name__}: {e}"
 
     @staticmethod
     def _extract_text_from_generate_payload(payload: Any) -> str:
-        """
-        Be tolerant to a few likely /v1/generate response shapes.
-
-        Examples:
-          - {"output": "..."}
-          - {"text": "..."}
-          - {"completion": "..."}
-          - {"data": {"output": "..."}}  (nested)
-          - raw string
-        """
         if payload is None:
             return ""
         if isinstance(payload, str):
@@ -138,21 +140,62 @@ class HttpEvalClient:
         return fallback
 
     @staticmethod
-    def _extract_error_fields(resp: httpx.Response) -> tuple[str, str, Optional[Dict[str, Any]]]:
+    def _extract_request_id(resp: httpx.Response, payload: Any) -> Optional[str]:
+        # Prefer header; fall back to body field if present
+        rid = resp.headers.get("X-Request-ID") or resp.headers.get("x-request-id")
+        if rid and rid.strip():
+            return rid.strip()
+        if isinstance(payload, dict):
+            v = payload.get("request_id")
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return None
+
+    def _extract_error_fields(self, resp: httpx.Response) -> tuple[str, str, Optional[Dict[str, Any]]]:
         """
         Normalize llm-server error shape.
 
         Expected server error payload:
-          {"code": "...", "message": "...", "extra": {...}}
-        If unavailable, fall back to resp.text.
+          {"code": "...", "message": "...", "extra": {...}, "request_id": "..."}
+        If unavailable/unparseable, fall back to resp.text and attach classification metadata.
         """
-        j = HttpEvalClient._safe_json(resp)
+        content_type = resp.headers.get("content-type", "") or ""
+        text_preview = self._shorten(resp.text or "", 2500)
+
+        j, jerr = self._safe_json(resp)
+        rid = self._extract_request_id(resp, j)
+
         if not isinstance(j, dict):
-            j = {}
+            # Server returned non-JSON (or JSON parse failed)
+            extra: Dict[str, Any] = {
+                "stage": "server_json_error" if jerr else "server_non_json",
+                "status_code": int(resp.status_code),
+                "content_type": content_type,
+                "request_id": rid,
+                "response_text": text_preview,
+            }
+            if jerr:
+                extra["json_error"] = jerr
+            return "http_error", text_preview or "HTTP error", extra
+
         code = str(j.get("code") or "http_error")
         msg = str(j.get("message") or (resp.text or ""))
-        extra = j.get("extra") if isinstance(j.get("extra"), dict) else None
-        return code, msg, extra
+        extra_any = j.get("extra") if isinstance(j.get("extra"), dict) else None
+
+        merged: Dict[str, Any] = {}
+        if isinstance(extra_any, dict):
+            merged.update(extra_any)
+
+        # Always include these classification-friendly fields
+        merged.setdefault("stage", "server_error")
+        merged["status_code"] = int(resp.status_code)
+        merged["content_type"] = content_type
+        if rid:
+            merged["request_id"] = rid
+        # keep preview; policy/eval can redact later if needed
+        merged.setdefault("response_text", text_preview)
+
+        return code, msg, merged
 
     # =========================
     # /v1/generate
@@ -185,19 +228,18 @@ class HttpEvalClient:
             )
         except Exception as e:
             latency_ms = (time.time() - t0) * 1000.0
-            # "status_code=0" signals transport/client failure, not an HTTP response.
             return GenerateErr(
                 status_code=0,
                 error_code="transport_error",
                 message=f"{type(e).__name__}: {e}",
-                extra=None,
+                extra={"stage": "transport_error", "exc_type": type(e).__name__},
                 latency_ms=latency_ms,
             )
 
         latency_ms = (time.time() - t0) * 1000.0
 
         if r.status_code == 200:
-            data = self._safe_json(r)
+            data, _ = self._safe_json(r)
             output_text = self._extract_text_from_generate_payload(data).strip()
             model_id = self._extract_model_from_payload(data, fallback=(model or "unknown"))
             cached = bool(data.get("cached", False)) if isinstance(data, dict) else False
@@ -257,18 +299,17 @@ class HttpEvalClient:
                 status_code=0,
                 error_code="transport_error",
                 message=f"{type(e).__name__}: {e}",
-                extra=None,
+                extra={"stage": "transport_error", "exc_type": type(e).__name__},
                 latency_ms=latency_ms,
             )
 
         latency_ms = (time.time() - t0) * 1000.0
 
         if r.status_code == 200:
-            data = self._safe_json(r)
+            data, _ = self._safe_json(r)
             if not isinstance(data, dict):
                 data = {}
 
-            # tolerate missing keys while keeping contract stable
             schema_out = data.get("schema_id", schema_id)
             model_out = data.get("model", model or "unknown")
             obj = data.get("data")
@@ -285,6 +326,11 @@ class HttpEvalClient:
             )
 
         code, msg, extra = self._extract_error_fields(r)
+        # Normalize stage for eval aggregation: if server JSON decode failed, use server_json_error
+        if isinstance(extra, dict) and extra.get("stage") in ("server_non_json", "server_error"):
+            # keep whatever server gave; just ensure at least one stable stage exists
+            extra.setdefault("stage", "server_error")
+
         return ExtractErr(
             status_code=int(r.status_code),
             error_code=code,

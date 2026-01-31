@@ -1,0 +1,30 @@
+# config/policy.yaml
+# Policy: should a model be extract-enabled for a task?
+
+version: 1
+tasks:
+  extraction_sroie:
+    enabled: true
+    thresholds_extraction_sroie:
+      # Hard quality gates (0..1)
+      schema_validity_rate: 0.98
+      required_present_rate: 0.99
+
+      # Optional: only enforced if your runner summary includes it and you set a value here
+      doc_required_exact_match_rate: 0.90
+
+      # Optional latency gate (ms) — only enforced if present in runner summary
+      latency_p95_ms: 2500
+
+      # Guardrail: don’t enable based on tiny eval runs
+      min_examples: 100
+
+models:
+  # report = only emit decision artifacts (no file writes)
+  # patch  = allow writing a models.yaml patch (you’ll implement later)
+  mode: report
+  models_yaml_path: null   # e.g. "config/models.full.yaml"
+  backup: true
+
+run:
+  outdir_root: policy_results

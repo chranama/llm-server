@@ -27,6 +27,13 @@ dependencies = [
 eval = "llm_eval.cli:main"
 
 [project.optional-dependencies]
+# Heavier dataset deps (only needed for certain dataset adapters)
+datasets = [
+  # Needed for Voxel51/scanned_receipts loader:
+  # `from fiftyone.utils.huggingface import load_from_hub`
+  "fiftyone>=1.0.0",
+]
+
 test = [
   "pytest>=8",
   "pytest-asyncio>=0.23",
@@ -40,8 +47,13 @@ lint = [
 ]
 
 viz = [
-    "matplotlib>=3.9", 
-    "seaborn>=0.13",
+  "matplotlib>=3.9",
+  "seaborn>=0.13",
+]
+
+# Convenience: install everything commonly used in this module
+all = [
+  "llm_eval[datasets,test,lint,viz]",
 ]
 
 [build-system]

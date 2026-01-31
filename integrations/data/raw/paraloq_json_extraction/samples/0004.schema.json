@@ -1,0 +1,240 @@
+{
+  "$defs": {
+    "Address": {
+      "properties": {
+        "city": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "state": {
+          "maxLength": 2,
+          "minLength": 2,
+          "type": "string"
+        },
+        "streetAddress": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "zipCode": {
+          "pattern": "^[0-9]{5}(?:-[0-9]{4})?$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "streetAddress",
+        "city",
+        "state",
+        "zipCode"
+      ],
+      "type": "object"
+    },
+    "Allergy": {
+      "properties": {
+        "name": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "reaction": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "severity": {
+          "enum": [
+            "Mild",
+            "Moderate",
+            "Severe"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "severity",
+        "reaction"
+      ],
+      "type": "object"
+    },
+    "Diagnosis": {
+      "properties": {
+        "code": {
+          "maxLength": 10,
+          "minLength": 1,
+          "type": "string"
+        },
+        "description": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "description"
+      ],
+      "type": "object"
+    },
+    "Immunization": {
+      "properties": {
+        "booster": {
+          "type": "boolean"
+        },
+        "date": {
+          "format": "date",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "date",
+        "booster"
+      ],
+      "type": "object"
+    },
+    "Medication": {
+      "properties": {
+        "dosage": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "frequency": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "dosage",
+        "frequency"
+      ],
+      "type": "object"
+    },
+    "PhoneNumber": {
+      "properties": {
+        "number": {
+          "pattern": "^\\d{3}-\\d{3}-\\d{4}$",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "Home",
+            "Mobile",
+            "Work",
+            "Other"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "number"
+      ],
+      "type": "object"
+    },
+    "Procedure": {
+      "properties": {
+        "code": {
+          "maxLength": 10,
+          "minLength": 1,
+          "type": "string"
+        },
+        "description": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "description"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "address": {
+      "$ref": "#/$defs/Address"
+    },
+    "allergies": {
+      "items": {
+        "$ref": "#/$defs/Allergy"
+      },
+      "type": "array"
+    },
+    "dateOfBirth": {
+      "format": "date",
+      "type": "string"
+    },
+    "diagnoses": {
+      "items": {
+        "$ref": "#/$defs/Diagnosis"
+      },
+      "type": "array"
+    },
+    "gender": {
+      "enum": [
+        "Male",
+        "Female",
+        "Other"
+      ],
+      "type": "string"
+    },
+    "immunizations": {
+      "items": {
+        "$ref": "#/$defs/Immunization"
+      },
+      "type": "array"
+    },
+    "medications": {
+      "items": {
+        "$ref": "#/$defs/Medication"
+      },
+      "type": "array"
+    },
+    "name": {
+      "maxLength": 255,
+      "minLength": 1,
+      "type": "string"
+    },
+    "patientId": {
+      "maxLength": 10,
+      "minLength": 1,
+      "type": "string"
+    },
+    "phoneNumbers": {
+      "items": {
+        "$ref": "#/$defs/PhoneNumber"
+      },
+      "type": "array"
+    },
+    "procedures": {
+      "items": {
+        "$ref": "#/$defs/Procedure"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "patientId",
+    "name",
+    "dateOfBirth",
+    "gender"
+  ],
+  "type": "object"
+}

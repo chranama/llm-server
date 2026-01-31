@@ -1,0 +1,21 @@
+# policy/Dockerfile.policy
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+# Copy policy package (keeps it robust if you add packaging metadata later)
+COPY policy/ /app/policy/
+
+# Install the package (editable for dev-like behavior)
+RUN pip install --no-cache-dir -U pip setuptools wheel \
+  && pip install --no-cache-dir -e /app/policy
+
+ENTRYPOINT ["llm-policy"]
+CMD ["--help"]

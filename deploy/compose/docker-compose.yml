@@ -1,40 +1,104 @@
 # deploy/compose/docker-compose.yml
+
+# ==========================
+# Templates / extension fields
+# ==========================
+
+x-api-base: &api_base
+  build:
+    context: ../..
+    dockerfile: backend/Dockerfile.backend
+  restart: "no"
+  environment:
+    APP_ROOT: "/app"
+
+    # Defaults (local/dev)
+    ENV: ${ENV:-dev}
+    MODEL_LOAD_MODE: ${MODEL_LOAD_MODE:-lazy}
+    REQUIRE_MODEL_READY: ${REQUIRE_MODEL_READY:-0}
+
+    # infra toggles
+    REDIS_ENABLED: ${REDIS_ENABLED:-0}
+
+    WORKERS: ${WORKERS:-1}
+    UVICORN_RELOAD: ${UVICORN_RELOAD:-0}
+
+    # Capabilities live in the models yaml now
+    MODELS_YAML: ${MODELS_YAML:-/app/config/models.yaml}
+
+  # IMPORTANT:
+  # Dockerized API services are wired to the INTERNAL infra service names:
+  #   postgres / redis
+  # Host-wired infra uses postgres_host / redis_host and is for host-run API only.
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_started
+
+x-postgres-base: &postgres_base
+  image: postgres:16-alpine
+  restart: unless-stopped
+  environment:
+    POSTGRES_USER: ${POSTGRES_USER:-llm}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-llm}
+    POSTGRES_DB: ${POSTGRES_DB:-llm}
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-llm} -d ${POSTGRES_DB:-llm}"]
+    interval: 5s
+    timeout: 3s
+    retries: 10
+
+x-redis-base: &redis_base
+  image: redis:7-alpine
+  restart: unless-stopped
+  command: ["redis-server", "--save", "", "--appendonly", "no"]
+  healthcheck:
+    test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+    interval: 5s
+    timeout: 3s
+    retries: 10
+
 services:
   # ==========================
-  # Data layer
+  # Data layer (INTERNAL-ONLY)
   # ==========================
   postgres:
-    image: postgres:16-alpine
-    restart: unless-stopped
+    <<: *postgres_base
     profiles: ["infra"]
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-llm}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-llm}
-      POSTGRES_DB: ${POSTGRES_DB:-llm}
     expose:
       - "5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-llm} -d ${POSTGRES_DB:-llm}"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
 
   redis:
-    image: redis:7-alpine
-    restart: unless-stopped
+    <<: *redis_base
     profiles: ["infra"]
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
     expose:
       - "6379"
     volumes:
       - redis_data:/data
-    healthcheck:
-      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+
+  # ==========================
+  # Data layer (HOST-PUBLISHED)
+  # For running llm_server on the host (not in docker).
+  # NOTE: separate volumes so you can run infra + infra-host without collisions.
+  # ==========================
+  postgres_host:
+    <<: *postgres_base
+    profiles: ["infra-host"]
+    ports:
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - pg_data_host:/var/lib/postgresql/data
+
+  redis_host:
+    <<: *redis_base
+    profiles: ["infra-host"]
+    ports:
+      - "${REDIS_HOST_PORT:-6379}:6379"
+    volumes:
+      - redis_data_host:/data
 
   # ==========================
   # Integration test infra (ephemeral)
@@ -49,7 +113,6 @@ services:
       POSTGRES_DB: ${ITEST_POSTGRES_DB:-llm_test}
     expose:
       - "5432"
-    # disposable + fast (no named volume)
     tmpfs:
       - /var/lib/postgresql/data
     healthcheck:
@@ -72,37 +135,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
-
-  # ==========================
-  # API base template
-  # ==========================
-  api_base: &api_base
-    build:
-      context: ../..
-      dockerfile: backend/Dockerfile.backend
-    restart: "no"
-    environment:
-      APP_ROOT: "/app"
-
-      # Defaults (local/dev)
-      ENV: ${ENV:-dev}
-      MODEL_LOAD_MODE: ${MODEL_LOAD_MODE:-lazy}
-      REQUIRE_MODEL_READY: ${REQUIRE_MODEL_READY:-0}
-
-      # infra toggles
-      REDIS_ENABLED: ${REDIS_ENABLED:-0}
-
-      WORKERS: ${WORKERS:-1}
-      UVICORN_RELOAD: ${UVICORN_RELOAD:-0}
-
-      # Capabilities live in the models yaml now
-      MODELS_YAML: ${MODELS_YAML:-/app/config/models.yaml}
-
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
 
   # ==========================
   # API (integration-test profile)
@@ -166,7 +198,7 @@ services:
       - "8000"
     volumes:
       - ${HOME}/.cache/huggingface:/root/.cache/huggingface
-      # If you keep repo config checked in, bind-mount it (optional):
+      # Optional: bind-mount repo config (if you want live edits)
       # - ../../config:/app/config:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8000/modelz || exit 1"]
@@ -264,7 +296,7 @@ services:
       EVAL_ARGS: ${EVAL_ARGS:-}
     volumes:
       - ../..:/work:ro
-      - ../../results:/work/results:rw   # ✅ host-visible eval artifacts
+      - ../../results:/work/results:rw
 
   eval_host:
     build:
@@ -277,9 +309,55 @@ services:
       EVAL_ARGS: ${EVAL_ARGS:-}
     volumes:
       - ../..:/work:ro
-      - ../../results:/work/results:rw   # ✅ host-visible eval artifacts
+      - ../../results:/work/results:rw
+  
+  # ==========================
+  # Policy
+  # ==========================
+  policy:
+    build:
+      context: ../..
+      dockerfile: policy/Dockerfile.policy
+    restart: "no"
+    profiles: ["policy"]
+    environment:
+      # Where policy reads eval artifacts from and writes outputs (if you choose to)
+      POLICY_RUN_DIR: ${POLICY_RUN_DIR:-/work/results/extraction_sroie/latest}
+      POLICY_MODEL_ID: ${POLICY_MODEL_ID:-default}
+      POLICY_MODELS_YAML: ${POLICY_MODELS_YAML:-/work/config/models.yaml}
+
+      # Thresholds packaged into the image, but you can override to point at repo-mounted thresholds if desired
+      POLICY_THRESHOLDS_ROOT: ${POLICY_THRESHOLDS_ROOT:-/app/policy/src/llm_policy/thresholds}
+      POLICY_THRESHOLD_PROFILE: ${POLICY_THRESHOLD_PROFILE:-extract/default}
+
+      # Output format (text|json|md) and optional output path
+      POLICY_FORMAT: ${POLICY_FORMAT:-text}
+      POLICY_OUT: ${POLICY_OUT:-}
+
+      # Extra args escape hatch
+      POLICY_ARGS: ${POLICY_ARGS:-}
+    volumes:
+      # Repo mount so you can point at real results/config in dev
+      - ../..:/work:rw
+      - ../../results:/work/results:rw
+      - ../../config:/work/config:rw
+    working_dir: /work
+    entrypoint: ["/bin/sh", "-lc"]
+    command: >
+      llm-policy decide-and-patch
+      --run-dir "${POLICY_RUN_DIR}"
+      --models-yaml "${POLICY_MODELS_YAML}"
+      --model-id "${POLICY_MODEL_ID}"
+      --threshold-profile "${POLICY_THRESHOLD_PROFILE}"
+      --thresholds-root "${POLICY_THRESHOLDS_ROOT}"
+      --format "${POLICY_FORMAT}"
+      ${POLICY_OUT:+--out "${POLICY_OUT}"}
+      ${POLICY_ARGS}
 
 volumes:
   pg_data:
   redis_data:
+  pg_data_host:
+  redis_data_host:
   grafana_data:
+

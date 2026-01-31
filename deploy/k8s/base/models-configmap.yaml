@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-models
+  namespace: llm
+data:
+  models.yaml: |
+    # TODO: paste your real config/models.yaml here
+    defaults:
+      capabilities:
+        extract: false
+        generate: true
+    models: []

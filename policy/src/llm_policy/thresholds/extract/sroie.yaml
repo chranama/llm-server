@@ -1,0 +1,18 @@
+# src/llm_policy/thresholds/extract/sroie.yaml
+max_error_rate: 0.02
+max_5xx_rate: 0.01
+max_transport_error_rate: 0.01
+
+min_schema_validity_rate: 0.92
+min_required_present_rate: 0.90
+min_doc_required_exact_match_rate: null
+
+min_field_exact_match_rate:
+  company: 0.75
+  date: 0.70
+  total: 0.70
+# address is often messy; set later if you want
+
+max_latency_p95_ms: null
+max_latency_p99_ms: null
+min_n_total: 20

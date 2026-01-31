@@ -1,4 +1,3 @@
-# deploy/k8s/base/api/deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -31,6 +30,10 @@ spec:
             # Tell Settings where to read YAML defaults
             - name: APP_CONFIG_PATH
               value: "/app/config/app.yaml"
+
+            # Models config (capabilities, defaults, per-model overrides)
+            - name: MODELS_YAML
+              value: "/app/models/models.yaml"
 
             # Runtime wiring (prefer secrets, avoid literals)
             - name: DATABASE_URL
@@ -66,8 +69,14 @@ spec:
               value: "/app"
 
           volumeMounts:
+            # app.yaml
             - name: llm-config
               mountPath: /app/config
+              readOnly: true
+
+            # models.yaml (separate configmap so policy can patch it)
+            - name: llm-models
+              mountPath: /app/models
               readOnly: true
 
           # If the process takes time to start, startupProbe prevents premature restarts
@@ -104,3 +113,10 @@ spec:
             items:
               - key: app.yaml
                 path: app.yaml
+
+        - name: llm-models
+          configMap:
+            name: llm-models
+            items:
+              - key: models.yaml
+                path: models.yaml

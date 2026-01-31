@@ -11,7 +11,7 @@ export interface GenerateRequestBody {
   top_k?: number;
   stop?: string[];
   model?: string;
-  cache?: boolean; // backend supports cache on /v1/generate
+  cache?: boolean;
 }
 
 export interface GenerateResponseBody {
@@ -53,13 +53,10 @@ export interface SchemaIndexItem {
   description?: string;
 }
 
-// -----------------------------
-// Types: /v1/schemas/{schema_id}
-// -----------------------------
 export type JsonSchema = Record<string, any>;
 
 // -----------------------------
-// Types: /v1/models (replaces /v1/capabilities)
+// Types: /v1/models
 // -----------------------------
 export interface ModelInfo {
   id: string;
@@ -79,11 +76,62 @@ export interface ModelsResponseBody {
   };
 }
 
-// Keep this name so callers don’t have to change imports/usages.
-// Now sourced from /v1/models.deployment_capabilities.
 export interface CapabilitiesResponseBody {
   generate: boolean;
   extract: boolean;
+}
+
+// -----------------------------
+// Types: admin endpoints
+// -----------------------------
+export interface AdminModelStats {
+  model_id: string;
+  total_requests: number;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  avg_latency_ms: number | null;
+}
+
+export interface AdminStatsResponse {
+  window_days: number;
+  since: string; // ISO string
+  total_requests: number;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  avg_latency_ms: number | null;
+  per_model: AdminModelStats[];
+}
+
+export interface AdminLogEntry {
+  id: number;
+  created_at: string;
+  api_key?: string | null;
+  route: string;
+  client_host?: string | null;
+  model_id: string;
+  latency_ms?: number | null;
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  prompt: string;
+  output?: string | null;
+}
+
+export interface AdminLogsPage {
+  total: number;
+  limit: number;
+  offset: number;
+  items: AdminLogEntry[];
+}
+
+export interface AdminLoadModelRequest {
+  model_id?: string | null;
+}
+
+export interface AdminLoadModelResponse {
+  ok: boolean;
+  already_loaded: boolean;
+  default_model: string;
+  models: string[];
 }
 
 // -----------------------------
@@ -103,18 +151,12 @@ export class ApiError extends Error {
   }
 
   private static makeMessage(status: number, bodyText: string, bodyJson: any | null) {
-    // Backend canonical shape:
-    //   { code, message, extra?, request_id? }
-    // Also tolerate:
-    //   { error: { code, message, ... }, request_id }   (older)
-    //   { detail: ... }                                (FastAPI default)
     if (bodyJson && typeof bodyJson === "object") {
       const errObj =
         bodyJson.error && typeof bodyJson.error === "object"
           ? bodyJson.error
           : bodyJson;
 
-      // Try common places for code/message
       const code =
         errObj.code != null
           ? String(errObj.code)
@@ -147,58 +189,37 @@ export class ApiError extends Error {
 
 /**
  * Runtime-configurable API base.
- *
- * Precedence:
- *  1) setApiBaseUrl() called by UI bootstrap (recommended; from /config.json)
- *  2) VITE_API_BASE_URL (dev fallback)
- *  3) "/api" (reverse-proxy default)
  */
 let API_BASE: string = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() || "/api";
 
-/**
- * If your backend is hosted at e.g. http://localhost:8000 (no /api),
- * pass base like "http://localhost:8000" and we will normalize to
- * "http://localhost:8000/api".
- *
- * If you pass "http://localhost:8000/api" we keep it as-is.
- */
 export function setApiBaseUrl(base: string | undefined | null): void {
   const s = (base ?? "").trim();
   if (!s) return;
 
-  // Allow relative "/api" too.
   if (s === "/api") {
     API_BASE = "/api";
     return;
   }
 
-  // Remove trailing slash
   const noTrail = s.endsWith("/") ? s.slice(0, -1) : s;
-
-  // If caller already includes /api, use it; else append /api.
   API_BASE = noTrail.endsWith("/api") ? noTrail : `${noTrail}/api`;
 }
 
 const API_KEY = import.meta.env.VITE_API_KEY as string | undefined;
 
-// ---- Dev UX: warn loudly if missing ----
 if (!API_KEY) {
   // eslint-disable-next-line no-console
   console.warn("VITE_API_KEY is not set. Requests will fail with 401 missing_api_key.");
 }
 
 function authHeaders(): HeadersInit {
-  // Backend expects X-API-Key per backend/src/llm_server/api/deps.py
   return API_KEY ? { "X-API-Key": API_KEY } : {};
 }
 
 async function requestJson<T>(path: string, init: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, init);
-
-  // Read body once
   const bodyText = await res.text();
 
-  // Parse only a bounded preview (prevents slow JSON.parse on huge HTML error pages)
   const preview = bodyText.slice(0, 4000);
   let bodyJson: any | null = null;
 
@@ -214,10 +235,7 @@ async function requestJson<T>(path: string, init: RequestInit): Promise<T> {
     throw new ApiError(res.status, preview, bodyJson);
   }
 
-  // If empty response, return {} as T
   if (!bodyText.trim()) return {} as T;
-
-  // Prefer parsed JSON if available; otherwise try parsing full body once (success path should be JSON)
   if (bodyJson !== null) return bodyJson as T;
 
   try {
@@ -256,18 +274,14 @@ export async function callExtract(body: ExtractRequestBody): Promise<ExtractResp
 export async function listSchemas(): Promise<SchemaIndexItem[]> {
   return requestJson<SchemaIndexItem[]>("/v1/schemas", {
     method: "GET",
-    headers: {
-      ...authHeaders(),
-    },
+    headers: { ...authHeaders() },
   });
 }
 
 export async function getSchema(schemaId: string): Promise<JsonSchema> {
   return requestJson<JsonSchema>(`/v1/schemas/${encodeURIComponent(schemaId)}`, {
     method: "GET",
-    headers: {
-      ...authHeaders(),
-    },
+    headers: { ...authHeaders() },
   });
 }
 
@@ -275,19 +289,62 @@ export function getApiBaseUrl(): string {
   return API_BASE;
 }
 
-// New: /v1/models
 export async function listModels(): Promise<ModelsResponseBody> {
   return requestJson<ModelsResponseBody>("/v1/models", {
     method: "GET",
-    headers: {
-      ...authHeaders(),
-    },
+    headers: { ...authHeaders() },
   });
 }
 
-// Back-compat: callers can keep using getCapabilities(),
-// but it now comes from /v1/models.deployment_capabilities.
 export async function getCapabilities(): Promise<CapabilitiesResponseBody> {
   const r = await listModels();
   return r.deployment_capabilities;
+}
+
+// -----------------------------
+// Admin API functions
+// -----------------------------
+export async function adminGetStats(windowDays: number = 30): Promise<AdminStatsResponse> {
+  const qs = new URLSearchParams({ window_days: String(windowDays) });
+  return requestJson<AdminStatsResponse>(`/v1/admin/stats?${qs.toString()}`, {
+    method: "GET",
+    headers: { ...authHeaders() },
+  });
+}
+
+export async function adminListLogs(params?: {
+  model_id?: string;
+  api_key?: string;
+  route?: string;
+  from_ts?: string;
+  to_ts?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<AdminLogsPage> {
+  const qs = new URLSearchParams();
+
+  if (params?.model_id) qs.set("model_id", params.model_id);
+  if (params?.api_key) qs.set("api_key", params.api_key);
+  if (params?.route) qs.set("route", params.route);
+  if (params?.from_ts) qs.set("from_ts", params.from_ts);
+  if (params?.to_ts) qs.set("to_ts", params.to_ts);
+
+  qs.set("limit", String(params?.limit ?? 50));
+  qs.set("offset", String(params?.offset ?? 0));
+
+  return requestJson<AdminLogsPage>(`/v1/admin/logs?${qs.toString()}`, {
+    method: "GET",
+    headers: { ...authHeaders() },
+  });
+}
+
+export async function adminLoadModel(body: AdminLoadModelRequest): Promise<AdminLoadModelResponse> {
+  return requestJson<AdminLoadModelResponse>("/v1/admin/models/load", {
+    method: "POST",
+    headers: {
+      ...authHeaders(),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body ?? {}),
+  });
 }

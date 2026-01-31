@@ -1,0 +1,178 @@
+{
+  "$defs": {
+    "Doctor": {
+      "properties": {
+        "contactInfo": {
+          "description": "Contact information for the doctor.",
+          "properties": {
+            "email": {
+              "description": "Email address of the doctor.",
+              "type": "string"
+            },
+            "phone": {
+              "description": "Phone number of the doctor.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "name": {
+          "description": "Name of the doctor.",
+          "type": "string"
+        },
+        "specialty": {
+          "description": "Specialty of the doctor.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "Lab": {
+      "properties": {
+        "address": {
+          "description": "Address of the lab.",
+          "type": "string"
+        },
+        "contactInfo": {
+          "description": "Contact information for the lab.",
+          "properties": {
+            "email": {
+              "description": "Email address of the lab.",
+              "type": "string"
+            },
+            "phone": {
+              "description": "Phone number of the lab.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "name": {
+          "description": "Name of the lab.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "MedicalTestResults": {
+      "properties": {
+        "date": {
+          "description": "Date when the medical test was performed.",
+          "format": "date",
+          "type": "string"
+        },
+        "description": {
+          "description": "Description of the medical test.",
+          "type": "string"
+        },
+        "doctor": {
+          "$ref": "#/$defs/Doctor"
+        },
+        "lab": {
+          "$ref": "#/$defs/Lab"
+        },
+        "notes": {
+          "description": "Additional notes about the medical test result.",
+          "type": "string"
+        },
+        "patient": {
+          "$ref": "#/$defs/Patient"
+        },
+        "referenceRange": {
+          "description": "Reference range for the medical test result.",
+          "properties": {
+            "high": {
+              "description": "Upper bound of the reference range.",
+              "type": "number"
+            },
+            "low": {
+              "description": "Lower bound of the reference range.",
+              "type": "number"
+            }
+          },
+          "type": "object"
+        },
+        "result": {
+          "description": "Numerical result of the medical test.",
+          "type": "number"
+        },
+        "status": {
+          "description": "Status of the medical test result.",
+          "enum": [
+            "normal",
+            "abnormal"
+          ],
+          "type": "string"
+        },
+        "testId": {
+          "description": "Unique identifier for the medical test.",
+          "type": "string"
+        },
+        "testName": {
+          "description": "Name of the medical test.",
+          "type": "string"
+        },
+        "units": {
+          "description": "Units of measurement for the medical test result.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "testId",
+        "testName",
+        "result",
+        "units",
+        "referenceRange",
+        "description"
+      ],
+      "type": "object"
+    },
+    "Patient": {
+      "properties": {
+        "contactInfo": {
+          "description": "Contact information for the patient.",
+          "properties": {
+            "email": {
+              "description": "Email address of the patient.",
+              "type": "string"
+            },
+            "phone": {
+              "description": "Phone number of the patient.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "dateOfBirth": {
+          "description": "Date of birth of the patient.",
+          "format": "date",
+          "type": "string"
+        },
+        "gender": {
+          "description": "Gender of the patient.",
+          "enum": [
+            "male",
+            "female"
+          ],
+          "type": "string"
+        },
+        "name": {
+          "description": "Name of the patient.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "dateOfBirth"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

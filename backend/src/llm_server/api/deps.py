@@ -19,6 +19,9 @@ from llm_server.services.llm import build_llm_from_settings
 from llm_server.services.llm_config import load_models_config
 from llm_server.services.llm_registry import MultiModelManager
 
+# NEW: policy overrides
+from llm_server.services.policy_decisions import policy_capability_overrides
+
 # -----------------------------------------------------------------------------
 # Types / constants
 # -----------------------------------------------------------------------------
@@ -219,7 +222,7 @@ def get_llm(request: Request) -> Any:
 
 
 # -----------------------------------------------------------------------------
-# Capability enforcement (deployment + per-model)
+# Capability enforcement (deployment + per-model + policy)
 # -----------------------------------------------------------------------------
 
 def deployment_capabilities(request: Request | None = None) -> Dict[str, bool]:
@@ -287,34 +290,44 @@ def model_capabilities(model_id: str, *, request: Request | None = None) -> Opti
     Priority:
       1) If MultiModelManager exists in app.state.llm -> use registry meta (runtime truth).
       2) Else fall back to models.yaml (cached).
-
-    NOTE: This reads llm._meta as a lightweight runtime source. If you later add a public
-    llm.model_capabilities() API, swap it here.
+      3) Apply POLICY overrides last (can fail-closed extract).
     """
+    base_caps: Optional[Dict[str, bool]] = None
+
     if request is not None:
         llm = getattr(request.app.state, "llm", None)
         if isinstance(llm, MultiModelManager):
             caps_meta = llm._meta.get(model_id, {}).get("capabilities", None)  # intentionally lightweight
             if caps_meta is None:
-                return None
-
-            if isinstance(caps_meta, dict):
-                # Normalize only known keys; keep partial semantics
+                base_caps = None
+            elif isinstance(caps_meta, dict):
                 out: Dict[str, bool] = {}
                 for k in _CAP_KEYS:
                     if k in caps_meta:
                         out[k] = bool(caps_meta.get(k))
-                return out or None
-
-            # list/tuple/set form: treat as allow-list
-            if isinstance(caps_meta, (list, tuple, set)):
+                base_caps = out or None
+            elif isinstance(caps_meta, (list, tuple, set)):
                 allowed = {str(x).strip().lower() for x in caps_meta if isinstance(x, str) and str(x).strip()}
-                return {k: (k in allowed) for k in _CAP_KEYS}
+                base_caps = {k: (k in allowed) for k in _CAP_KEYS}
+            else:
+                base_caps = None
+        else:
+            base_caps = _model_capabilities_from_models_yaml(model_id)
+    else:
+        base_caps = _model_capabilities_from_models_yaml(model_id)
 
-            # unknown type => treat as unspecified
-            return None
+    # --- POLICY OVERRIDES (last writer wins) ---
+    if request is not None:
+        pol = policy_capability_overrides(model_id, request=request)
+        if pol:
+            # Merge onto base_caps; if base is None, policy becomes the only explicit caps map.
+            merged: Dict[str, bool] = dict(base_caps or {})
+            for k, v in pol.items():
+                if k in _CAP_KEYS:
+                    merged[k] = bool(v)
+            return merged or None
 
-    return _model_capabilities_from_models_yaml(model_id)
+    return base_caps
 
 
 def effective_capabilities(
@@ -346,7 +359,8 @@ def require_capability(
     """
     Enforce that:
       1) deployment allows the capability, AND
-      2) the chosen model is capable (per registry meta or models.yaml)
+      2) the chosen model is capable (registry meta / models.yaml), AND
+      3) policy overrides (if any) allow it (wired via model_capabilities()).
 
     Raises:
       - 501 capability_disabled (deployment off)
@@ -411,18 +425,6 @@ def resolve_model(
     """
     Resolve a concrete (model_id, model_backend) pair.
 
-    - MultiModelManager:
-        - override wins if exists
-        - else:
-            - if capability provided and registry supports default_for_capability -> use it
-            - else use default_id
-    - dict registry (legacy):
-        - override wins if allowed + present
-        - else default from settings (or first key)
-    - single backend:
-        - override validated against allowed list (if present)
-        - else settings.model_id
-
     NOTE: This function does NOT call require_capability(). Endpoints do that explicitly.
     """
     allowed = allowed_model_ids(request=request)
@@ -448,7 +450,6 @@ def resolve_model(
                     except Exception:
                         model_id = llm.default_id
 
-        # Optional: keep "allowed list" enforcement (useful if you gate beyond registry)
         if allowed and model_id not in allowed:
             raise AppError(
                 code="model_not_allowed",
@@ -508,18 +509,13 @@ def sha32_json(params: dict[str, Any]) -> str:
 
 
 def make_cache_redis_key(model_id: str, prompt_hash: str, params_fp: str) -> str:
-    # Used by /generate cache
     return f"llm:cache:{model_id}:{prompt_hash}:{params_fp}"
 
 
 def make_extract_redis_key(model_id: str, prompt_hash: str, params_fp: str) -> str:
-    # Used by /extract cache
     return f"llm:extract:{model_id}:{prompt_hash}:{params_fp}"
 
 
 def fingerprint_pydantic(body: Any, *, exclude: set[str], exclude_none: bool = True) -> str:
-    """
-    Stable param fingerprint from a pydantic model: sha over JSON of selected fields.
-    """
     params = body.model_dump(exclude=exclude, exclude_none=exclude_none)
     return sha32_json(params)
