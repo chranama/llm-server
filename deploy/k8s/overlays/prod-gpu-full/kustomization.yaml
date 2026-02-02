@@ -16,6 +16,6 @@ generatorOptions:
   disableNameSuffixHash: true
 
 patchesStrategicMerge:
-  - api-patch.yaml
+  - server-patch.yaml
   # optional: tweak hostnames/TLS/etc for prod
   - ingress-patch.yaml

@@ -1,3 +1,4 @@
+# eval/pyproject.toml
 [project]
 name = "llm_eval"
 version = "0.1.0"
@@ -21,6 +22,7 @@ dependencies = [
   # CLI / config
   "python-dotenv>=1.0.0",
   "pydantic-settings>=2.0",
+  "llm-contracts @ file:../contracts",
 ]
 
 [project.scripts]

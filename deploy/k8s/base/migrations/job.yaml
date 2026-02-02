@@ -28,7 +28,7 @@ spec:
               value: "/app"
 
             - name: APP_CONFIG_PATH
-              value: "/app/config/app.yaml"
+              value: "/app/config/server.yaml"
 
             - name: DATABASE_URL
               valueFrom:

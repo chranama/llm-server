@@ -1,0 +1,22 @@
+# deploy/docker/Dockerfile.eval
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential curl wget git \
+  && rm -rf /var/lib/apt/lists/*
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /work
+
+# ---- contracts first ----
+COPY contracts/ /work/contracts/
+RUN pip install --no-cache-dir /work/contracts
+
+# ---- eval package ----
+COPY eval/pyproject.toml /work/eval/pyproject.toml
+COPY eval/src /work/eval/src
+RUN pip install --no-cache-dir /work/eval
+
+CMD ["eval", "--help"]

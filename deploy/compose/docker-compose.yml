@@ -1,13 +1,13 @@
 # deploy/compose/docker-compose.yml
-
+#
 # ==========================
 # Templates / extension fields
 # ==========================
 
-x-api-base: &api_base
+x-server-base: &server_base
   build:
     context: ../..
-    dockerfile: backend/Dockerfile.backend
+    dockerfile: deploy/docker/Dockerfile.server
   restart: "no"
   environment:
     APP_ROOT: "/app"
@@ -26,10 +26,13 @@ x-api-base: &api_base
     # Capabilities live in the models yaml now
     MODELS_YAML: ${MODELS_YAML:-/app/config/models.yaml}
 
+    # Phase 0: canonical policy decision location inside container
+    POLICY_DECISION_PATH: ${POLICY_DECISION_PATH:-/app/policy_out/latest.json}
+
   # IMPORTANT:
-  # Dockerized API services are wired to the INTERNAL infra service names:
+  # Dockerized server services are wired to the INTERNAL infra service names:
   #   postgres / redis
-  # Host-wired infra uses postgres_host / redis_host and is for host-run API only.
+  # Host-wired infra uses postgres_host / redis_host and is for host-run server only.
   depends_on:
     postgres:
       condition: service_healthy
@@ -137,10 +140,10 @@ services:
       retries: 10
 
   # ==========================
-  # API (integration-test profile)
+  # Server (integration-test profile)
   # ==========================
-  api_itest:
-    <<: *api_base
+  server_itest:
+    <<: *server_base
     profiles: ["itest"]
     environment:
       ENV: test
@@ -156,6 +159,9 @@ services:
 
       # Optional: make it explicit that this should never warm models
       MODEL_WARMUP: "0"
+
+      # In itest we still honor the canonical path, but allow override
+      POLICY_DECISION_PATH: ${POLICY_DECISION_PATH:-/app/policy_out/latest.json}
     ports: []
     expose:
       - "8000"
@@ -164,15 +170,23 @@ services:
         condition: service_healthy
       redis_itest:
         condition: service_healthy
+    volumes:
+      # allow tests to write/read artifacts deterministically if needed
+      - ../../policy_out:/app/policy_out:rw
 
   # ==========================
-  # API (CPU / portable)
+  # Server (CPU / portable)
   # ==========================
-  api:
-    <<: *api_base
-    profiles: ["api"]
+  server:
+    <<: *server_base
+    profiles: ["server"]
     ports:
       - "${API_PORT:-8000}:8000"
+    volumes:
+      # Phase 0: canonical decision artifact is bind-mounted so policy can write and server can read
+      - ../../policy_out:/app/policy_out:rw
+      # Optional: bind-mount config for live edits
+      # - ../../config:/app/config:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8000/readyz || exit 1"]
       interval: 10s
@@ -180,11 +194,11 @@ services:
       retries: 20
 
   # ==========================
-  # API (GPU)
+  # Server (GPU)
   # ==========================
-  api_gpu:
-    <<: *api_base
-    profiles: ["api-gpu"]
+  server_gpu:
+    <<: *server_base
+    profiles: ["server-gpu"]
     environment:
       ENV: ${ENV:-prod}
       MODEL_LOAD_MODE: ${MODEL_LOAD_MODE:-eager}
@@ -193,11 +207,13 @@ services:
       REDIS_ENABLED: ${REDIS_ENABLED:-1}
       UVICORN_RELOAD: "0"
       MODELS_YAML: ${MODELS_YAML:-/app/config/models.yaml}
+      POLICY_DECISION_PATH: ${POLICY_DECISION_PATH:-/app/policy_out/latest.json}
     ports: []
     expose:
       - "8000"
     volumes:
       - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+      - ../../policy_out:/app/policy_out:rw
       # Optional: bind-mount repo config (if you want live edits)
       # - ../../config:/app/config:ro
     healthcheck:
@@ -219,8 +235,8 @@ services:
   # ==========================
   ui:
     build:
-      context: ../../ui
-      dockerfile: Dockerfile.ui
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.ui
       args:
         VITE_API_KEY: ${API_KEY}
         VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
@@ -247,7 +263,7 @@ services:
       - "${PGADMIN_PORT:-5050}:80"
 
   # ==========================
-  # Observability (docker API)
+  # Observability (docker server)
   # ==========================
   prometheus:
     image: prom/prometheus:v2.54.1
@@ -276,7 +292,7 @@ services:
     restart: unless-stopped
     profiles: ["obs-host"]
     command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--config.file=/etc/prometheus/prometheus.host.yml"
     volumes:
       - ../observability/prometheus/prometheus.host.yml:/etc/prometheus/prometheus.yml:ro
     ports:
@@ -288,59 +304,80 @@ services:
   eval:
     build:
       context: ../..
-      dockerfile: eval/Dockerfile.eval
+      dockerfile: deploy/docker/Dockerfile.eval
     restart: "no"
     profiles: ["eval"]
     environment:
-      API_BASE_URL: ${API_BASE_URL:-http://api:8000}
+      # NOTE: server service name is "server"
+      API_BASE_URL: ${API_BASE_URL:-http://server:8000}
       EVAL_ARGS: ${EVAL_ARGS:-}
+
+      # Canonical pointer writing (eval_out)
+      EVAL_WRITE_LATEST: ${EVAL_WRITE_LATEST:-1}
+      # If your eval io supports EVAL_OUT_PATH (single file override), set it here.
+      # Otherwise it will write eval_out/<task>/latest.json via llm_contracts default.
+      EVAL_OUT_PATH: ${EVAL_OUT_PATH:-}
     volumes:
+      # eval image runs in /work; it needs RW access to results + eval_out
       - ../..:/work:ro
       - ../../results:/work/results:rw
+      - ../../eval_out:/work/eval_out:rw
 
   eval_host:
     build:
       context: ../..
-      dockerfile: eval/Dockerfile.eval
+      dockerfile: deploy/docker/Dockerfile.eval
     restart: "no"
     profiles: ["eval-host"]
     environment:
       API_BASE_URL: ${API_BASE_URL:-http://host.docker.internal:${API_PORT:-8000}}
       EVAL_ARGS: ${EVAL_ARGS:-}
+      EVAL_WRITE_LATEST: ${EVAL_WRITE_LATEST:-1}
+      EVAL_OUT_PATH: ${EVAL_OUT_PATH:-}
     volumes:
       - ../..:/work:ro
       - ../../results:/work/results:rw
-  
+      - ../../eval_out:/work/eval_out:rw
+
   # ==========================
   # Policy
   # ==========================
   policy:
     build:
       context: ../..
-      dockerfile: policy/Dockerfile.policy
+      dockerfile: deploy/docker/Dockerfile.policy
     restart: "no"
     profiles: ["policy"]
     environment:
-      # Where policy reads eval artifacts from and writes outputs (if you choose to)
-      POLICY_RUN_DIR: ${POLICY_RUN_DIR:-/work/results/extraction_sroie/latest}
+      # Phase 0/1: prefer canonical eval pointer by default
+      # With the updated policy CLI, "latest" means: follow eval_out pointer.
+      POLICY_RUN_DIR: ${POLICY_RUN_DIR:-latest}
+
       POLICY_MODEL_ID: ${POLICY_MODEL_ID:-default}
+
+      # Policy reads/writes models.yaml in the repo view by default
       POLICY_MODELS_YAML: ${POLICY_MODELS_YAML:-/work/config/models.yaml}
 
       # Thresholds packaged into the image, but you can override to point at repo-mounted thresholds if desired
       POLICY_THRESHOLDS_ROOT: ${POLICY_THRESHOLDS_ROOT:-/app/policy/src/llm_policy/thresholds}
       POLICY_THRESHOLD_PROFILE: ${POLICY_THRESHOLD_PROFILE:-extract/default}
 
-      # Output format (text|json|md) and optional output path
-      POLICY_FORMAT: ${POLICY_FORMAT:-text}
-      POLICY_OUT: ${POLICY_OUT:-}
+      # Decision artifact path (canonical inside server container); policy writes to host bind-mount
+      POLICY_OUT_PATH: ${POLICY_OUT_PATH:-/work/policy_out/latest.json}
+
+      # Optional: allow policy to locate eval_out pointer directory explicitly
+      # (only used if your policy loader reads env; safe to include)
+      EVAL_OUT_PATH: ${EVAL_OUT_PATH:-}
 
       # Extra args escape hatch
       POLICY_ARGS: ${POLICY_ARGS:-}
     volumes:
-      # Repo mount so you can point at real results/config in dev
+      # Policy needs RW access to results + eval_out + policy_out + config
       - ../..:/work:rw
       - ../../results:/work/results:rw
       - ../../config:/work/config:rw
+      - ../../eval_out:/work/eval_out:rw
+      - ../../policy_out:/work/policy_out:rw
     working_dir: /work
     entrypoint: ["/bin/sh", "-lc"]
     command: >
@@ -350,8 +387,7 @@ services:
       --model-id "${POLICY_MODEL_ID}"
       --threshold-profile "${POLICY_THRESHOLD_PROFILE}"
       --thresholds-root "${POLICY_THRESHOLDS_ROOT}"
-      --format "${POLICY_FORMAT}"
-      ${POLICY_OUT:+--out "${POLICY_OUT}"}
+      --artifact-out "${POLICY_OUT_PATH}"
       ${POLICY_ARGS}
 
 volumes:
@@ -360,4 +396,3 @@ volumes:
   pg_data_host:
   redis_data_host:
   grafana_data:
-

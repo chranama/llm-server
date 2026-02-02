@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "eval_run_pointer_v1",
+  "title": "EvalRunPointerV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "generated_at", "task", "run_id", "store"],
+  "properties": {
+    "schema_version": { "const": "eval_run_pointer_v1" },
+    "generated_at": { "type": "string", "minLength": 1 },
+
+    "task": { "type": "string", "minLength": 1 },
+    "run_id": { "type": "string", "minLength": 1 },
+
+    "store": { "type": "string", "enum": ["fs", "db"] },
+
+    "run_dir": { "type": "string" },
+    "summary_path": { "type": "string" },
+
+    "base_url": { "type": "string" },
+    "model_override": { "type": ["string", "null"] },
+    "schema_id": { "type": ["string", "null"] },
+    "max_examples": { "type": ["integer", "null"], "minimum": 0 },
+
+    "notes": { "type": ["object", "null"], "additionalProperties": true }
+  }
+}

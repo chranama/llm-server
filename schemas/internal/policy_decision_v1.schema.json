@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "policy_decision_v1",
+  "title": "PolicyDecisionArtifactV1",
+  "type": "object",
+  "additionalProperties": false,
+
+  "required": [
+    "schema_version",
+    "generated_at",
+    "policy",
+    "status",
+    "ok",
+    "enable_extract",
+    "contract_errors",
+    "thresholds_profile",
+    "eval_run_dir",
+    "reasons",
+    "warnings"
+  ],
+
+  "properties": {
+    "schema_version": { "const": "policy_decision_v1" },
+
+    "generated_at": {
+      "type": "string",
+      "minLength": 1,
+      "format": "date-time"
+    },
+
+    "policy": { "type": "string", "minLength": 1 },
+
+    "status": { "type": "string", "enum": ["allow", "deny", "unknown"] },
+
+    "ok": { "type": "boolean" },
+
+    "enable_extract": { "type": "boolean" },
+
+    "contract_errors": { "type": "integer", "minimum": 0 },
+
+    "thresholds_profile": { "type": "string", "minLength": 1 },
+
+    "thresholds_version": { "type": ["string", "null"], "minLength": 1 },
+
+    "eval_run_dir": { "type": "string", "minLength": 1 },
+
+    "eval_task": { "type": ["string", "null"], "minLength": 1 },
+
+    "eval_run_id": { "type": ["string", "null"], "minLength": 1 },
+
+    "model_id": { "type": ["string", "null"], "minLength": 1 },
+
+    "reasons": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "message", "context"],
+        "properties": {
+          "code": { "type": "string", "minLength": 1 },
+          "message": { "type": "string", "minLength": 1 },
+          "context": { "type": "object", "additionalProperties": true }
+        }
+      }
+    },
+
+    "warnings": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "message", "context"],
+        "properties": {
+          "code": { "type": "string", "minLength": 1 },
+          "message": { "type": "string", "minLength": 1 },
+          "context": { "type": "object", "additionalProperties": true }
+        }
+      }
+    },
+
+    "metrics": { "type": "object", "additionalProperties": true },
+
+    "contract_warnings": { "type": "integer", "minimum": 0 }
+  },
+
+  "allOf": [
+    {
+      "if": {
+        "properties": { "status": { "enum": ["deny", "unknown"] } },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "ok": { "const": false },
+          "enable_extract": { "const": false }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "contract_errors": { "minimum": 1 } },
+        "required": ["contract_errors"]
+      },
+      "then": {
+        "properties": {
+          "ok": { "const": false },
+          "enable_extract": { "const": false }
+        }
+      }
+    }
+  ]
+}

@@ -1,3 +1,4 @@
+# .dockerignore
 # =========================
 # Git / VCS
 # =========================
@@ -19,6 +20,9 @@
 **/.ruff_cache
 **/.coverage
 **/htmlcov
+dist
+build
+**/*.whl
 
 # Virtual environments
 .venv
@@ -52,7 +56,7 @@ Thumbs.db
 !.env.example
 
 # =========================
-# Data / Results / Artifacts
+# Data / Results / Artifacts (keep out of images)
 # =========================
 data
 results
@@ -62,6 +66,8 @@ checkpoints
 logs
 tmp
 cache
+policy_out
+eval_out
 
 # =========================
 # HuggingFace / ML caches
@@ -92,13 +98,14 @@ coverage
 docker-compose.override.yml
 
 # =========================
-# Keep important things
+# Keep important things (mostly redundant, but explicit)
 # =========================
 !config
 !schemas
-!migrations
-!alembic.ini
-!backend
+!server/alembic.ini
+!server/migrations
+!server/migrations/**
 !eval
+!policy
 !ui
 !deploy

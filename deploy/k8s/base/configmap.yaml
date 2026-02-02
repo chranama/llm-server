@@ -5,7 +5,7 @@ metadata:
   name: llm-config
   namespace: llm
 data:
-  app.yaml: |
+  server.yaml: |
     service:
       name: "llm-extraction-platform"
       version: "0.1.0"

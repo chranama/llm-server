@@ -16,6 +16,7 @@ jobs:
   backend_unit:
     name: backend (unit)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         shell: bash
@@ -55,9 +56,11 @@ jobs:
           ENV: "test"
           DATABASE_URL: "sqlite+aiosqlite:///./ci_unit.db"
           REDIS_ENABLED: "0"
+          MODEL_LOAD_MODE: "off"
+          REQUIRE_MODEL_READY: "0"
         run: |
           set -euxo pipefail
-          uv run pytest -q -m unit --maxfail=1 --disable-warnings \
+          uv run pytest -q -ra -m unit --maxfail=1 --disable-warnings \
             --cov=llm_server --cov-report=xml
 
       - name: Upload coverage (backend unit)
@@ -84,6 +87,7 @@ jobs:
   backend_integration:
     name: backend (integration)
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     defaults:
       run:
         shell: bash
@@ -145,7 +149,7 @@ jobs:
           set -euxo pipefail
           # If your integration suite requires migrations in CI, uncomment:
           # uv run alembic upgrade head
-          uv run pytest -q -m integration --maxfail=1 --disable-warnings
+          uv run pytest -q -ra -m integration --maxfail=1 --disable-warnings
 
       - name: Debug on failure
         if: failure()
@@ -163,6 +167,7 @@ jobs:
   policy_unit:
     name: policy (tests)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         shell: bash
@@ -200,7 +205,7 @@ jobs:
       - name: Run policy tests
         run: |
           set -euxo pipefail
-          uv run pytest -q --maxfail=1 --disable-warnings
+          uv run pytest -q -ra --maxfail=1 --disable-warnings
 
       - name: Debug on failure
         if: failure()
@@ -219,6 +224,7 @@ jobs:
   ui_test:
     name: ui (tests)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         shell: bash
@@ -240,7 +246,6 @@ jobs:
 
       - name: Run tests
         env:
-          # Safe defaults for UI tests: avoid relying on real API calls
           VITE_API_KEY: "dev"
           VITE_API_BASE_URL: "/api"
         run: |
@@ -263,40 +268,16 @@ jobs:
 
 
   # -------------------------
-  # Eval: smoke job
+  # Eval: unit (unmarked tests)
   # -------------------------
-  eval_smoke:
-    name: eval (smoke)
+  eval_unit:
+    name: eval (unit)
     runs-on: ubuntu-latest
-    needs: [backend_unit]
+    timeout-minutes: 15
     defaults:
       run:
         shell: bash
-
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: llm
-          POSTGRES_PASSWORD: llm
-          POSTGRES_DB: llm_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd="pg_isready -U llm -d llm_test"
-          --health-interval=5s
-          --health-timeout=3s
-          --health-retries=10
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd="redis-cli ping | grep PONG"
-          --health-interval=5s
-          --health-timeout=3s
-          --health-retries=10
-
+        working-directory: eval
     steps:
       - uses: actions/checkout@v4
 
@@ -312,68 +293,83 @@ jobs:
           uv --version
           python -V
 
-      - name: Sync deps (backend + eval)
+      - name: Sync deps (eval)
         run: |
           set -euxo pipefail
-          cd backend
-          uv sync --extra test --extra cpu
-          cd ../eval
-          uv sync --extra test
+          uv sync --extra test --extra lint
 
-      - name: Start backend API (background)
-        env:
-          ENV: "test"
-          DATABASE_URL: "postgresql+asyncpg://llm:llm@localhost:5432/llm_test"
-          REDIS_ENABLED: "1"
-          REDIS_URL: "redis://localhost:6379/0"
-          MODEL_LOAD_MODE: "off"
-          REQUIRE_MODEL_READY: "0"
-          PORT: "8000"
+      - name: Lint (ruff)
         run: |
           set -euxo pipefail
-          cd backend
-          # If needed:
-          # uv run alembic upgrade head
-          nohup uv run serve > /tmp/backend.log 2>&1 &
-          echo $! > /tmp/backend.pid
+          uv run ruff check .
 
-      - name: Wait for API readiness
+      - name: Format check (black)
         run: |
           set -euxo pipefail
-          for i in {1..60}; do
-            if curl -fsS "http://localhost:8000/readyz" >/dev/null; then
-              echo "API is ready"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "API did not become ready"
-          tail -n 300 /tmp/backend.log || true
-          exit 1
+          uv run black --check .
 
-      - name: Run eval smoke
-        env:
-          API_BASE_URL: "http://localhost:8000"
+      - name: Run eval unit tests (unmarked only)
         run: |
           set -euxo pipefail
-          cd eval
-          # Adjust these to your eval CLI's actual interface.
-          uv run python -m llm_eval.cli --help || true
-          # Example placeholder; replace with your real smoke command:
-          uv run python -m llm_eval.cli --list-tasks || true
+          # Eval unit tests are unmarked; integration tests are marked.
+          uv run pytest -q -ra --maxfail=1 --disable-warnings -m "not integration"
 
-      - name: Show backend logs on failure
+      - name: Debug on failure
         if: failure()
         run: |
           set -euxo pipefail
-          tail -n 300 /tmp/backend.log || true
-          docker logs ${{ job.services.postgres.id }} || true
-          docker logs ${{ job.services.redis.id }} || true
+          echo "=== eval unit debug ==="
+          uv --version
+          python -V
+          uv pip list
+          git status --porcelain || true
 
-      - name: Stop backend
-        if: always()
+
+  # -------------------------
+  # Eval: integration (marked)
+  # -------------------------
+  eval_integration:
+    name: eval (integration)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+        working-directory: eval
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
         run: |
           set -euxo pipefail
-          if [ -f /tmp/backend.pid ]; then
-            kill "$(cat /tmp/backend.pid)" || true
-          fi
+          pipx install uv
+          uv --version
+          python -V
+
+      - name: Sync deps (eval)
+        run: |
+          set -euxo pipefail
+          uv sync --extra test
+
+      - name: Run eval integration tests (marked)
+        env:
+          # Keep explicit; tests should skip/handle if not needed.
+          API_BASE_URL: "http://localhost:8000"
+        run: |
+          set -euxo pipefail
+          uv run pytest -q -ra --maxfail=1 --disable-warnings -m integration
+
+      - name: Debug on failure
+        if: failure()
+        run: |
+          set -euxo pipefail
+          echo "=== eval integration debug ==="
+          uv --version
+          python -V
+          uv pip list
+          git status --porcelain || true

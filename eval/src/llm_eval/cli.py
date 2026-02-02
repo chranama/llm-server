@@ -1,4 +1,4 @@
-# llm_eval/cli.py
+# eval/src/llm_eval/cli.py
 from __future__ import annotations
 
 import argparse
@@ -9,6 +9,14 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from llm_eval.config import dig, get_api_key, load_eval_yaml
+from llm_eval.io.run_artifacts import (
+    default_outdir,
+    write_eval_run_artifacts,
+)
+from llm_eval.io.run_pointer import (
+    default_eval_out_pointer_path,
+    write_eval_latest_pointer,
+)
 from llm_eval.reports.writer import render_reports_bundle
 from llm_eval.runners.base import BaseEvalRunner, EvalConfig
 
@@ -17,35 +25,11 @@ def _utc_run_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def _ensure_dir(path: str) -> None:
-    os.makedirs(path, exist_ok=True)
-
-
-def _write_json(path: str, obj: Any) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
-
-
-def _write_text(path: str, text: str) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text)
-
-
-def _write_jsonl(path: str, rows: list[dict[str, Any]]) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-
-
 def _shorten(text: str, n: int) -> str:
     s = (text or "").strip()
     if len(s) <= n:
         return s
     return s[: n - 3] + "..."
-
-
-def _default_outdir(root: str, task: str, run_id: str) -> str:
-    return os.path.join(root, task, run_id)
 
 
 def _coerce_nested_payload(
@@ -89,42 +73,6 @@ def _coerce_nested_payload(
 
     summary: dict[str, Any] = dict(summary_any)
     return summary, results, report_text, returned_config
-
-
-# NOTE: preserved for backwards-compatibility / minimal diff,
-# but no longer used once reports.writer is the canonical output path.
-def _fallback_report_text(task: str, run_id: str, base_url: str, summary: dict[str, Any]) -> str:
-    lines: list[str] = []
-    lines.append(f"task={task}")
-    lines.append(f"run_id={run_id}")
-    lines.append(f"base_url={summary.get('base_url', base_url)}")
-
-    if summary.get("dataset"):
-        lines.append(f"dataset={summary.get('dataset')}")
-    if summary.get("split"):
-        lines.append(f"split={summary.get('split')}")
-    if summary.get("max_examples") is not None:
-        lines.append(f"max_examples={summary.get('max_examples')}")
-
-    for k in [
-        "schema_validity_rate",
-        "doc_required_exact_match_rate",
-        "required_present_rate",
-        "answerable_exact_match_rate",
-        "unanswerable_accuracy",
-        "combined_score",
-        "precision",
-        "recall",
-        "f1",
-    ]:
-        if k in summary:
-            lines.append(f"{k}={summary.get(k)}")
-
-    for k in ["latency_p50_ms", "latency_p95_ms", "latency_p99_ms"]:
-        if summary.get(k) is not None:
-            lines.append(f"{k}={summary.get(k)}")
-
-    return "\n".join(lines) + "\n"
 
 
 # -----------------------
@@ -280,12 +228,27 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    """
+    Parse env var as a boolean-ish flag.
+    Accepts: 1/0, true/false, yes/no, on/off (case-insensitive).
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    s = raw.strip().lower()
+    if s in ("1", "true", "yes", "y", "on"):
+        return True
+    if s in ("0", "false", "no", "n", "off"):
+        return False
+    return default
+
+
 async def amain(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
 
     cfg_yaml = load_eval_yaml(args.config)
-
     factories = _task_factories()
 
     if args.list_tasks:
@@ -348,34 +311,57 @@ async def amain(argv: list[str] | None = None) -> None:
     summary["task"] = task_name
     summary["run_id"] = run_id
 
-    # Save artifacts (CLI owns persistence)
-    outdir = args.outdir or _default_outdir(outdir_root, task_name, run_id)
+    # Ensure base_url is reflected in summary for downstream tooling/policy
+    summary.setdefault("base_url", base_url)
 
+    # Outdir
+    outdir = args.outdir or default_outdir(outdir_root, task_name, run_id)
+
+    # Render reports (pure strings; no writes)
+    bundle = render_reports_bundle(
+        task=task_name,
+        run_id=run_id,
+        base_url=base_url,
+        summary=summary,
+        results=results,
+        runner_report_text=runner_report_text,
+    )
+
+    # Persist artifacts via io/
     if do_save:
-        _ensure_dir(outdir)
-
-        # IMPORTANT: add run_dir BEFORE writing summary.json (tests assert it exists on disk)
+        # Ensure run_dir is present and matches disk
         summary["run_dir"] = outdir
 
-        _write_json(os.path.join(outdir, "summary.json"), summary)
-
-        if results:
-            _write_jsonl(os.path.join(outdir, "results.jsonl"), results)
-
-        # Canonical report outputs (writer owns fallback behavior)
-        bundle = render_reports_bundle(
-            task=task_name,
-            run_id=run_id,
-            base_url=base_url,
+        paths = write_eval_run_artifacts(
+            outdir=outdir,
             summary=summary,
             results=results,
-            runner_report_text=runner_report_text,
+            report_txt=bundle.text,
+            report_md=bundle.md,
+            returned_config=returned_config if isinstance(returned_config, dict) else None,
         )
-        _write_text(os.path.join(outdir, "report.txt"), bundle.text)
-        _write_text(os.path.join(outdir, "report.md"), bundle.md)
 
-        if isinstance(returned_config, dict):
-            _write_json(os.path.join(outdir, "config.json"), returned_config)
+        # Optional: write eval_out/latest.json pointer (for demo-friendly wiring)
+        # Defaults to ON when saving, can disable via EVAL_WRITE_LATEST=0.
+        write_latest = _env_flag("EVAL_WRITE_LATEST", default=True)
+        if write_latest:
+            pointer_path = os.getenv("EVAL_LATEST_PATH", "").strip()
+            if not pointer_path:
+                pointer_path = str(default_eval_out_pointer_path())
+
+            write_eval_latest_pointer(
+                pointer_path=pointer_path,
+                task=task_name,
+                run_id=run_id,
+                run_dir=outdir,
+                summary_path=str(paths.summary_json),
+                extra={
+                    # non-authoritative conveniences (safe to drop later)
+                    "base_url": base_url,
+                    "model_override": model_override,
+                    "max_examples": max_examples,
+                },
+            )
 
     # Optional debug print of first N results
     if args.debug_n and args.debug_n > 0:
@@ -422,7 +408,8 @@ async def amain(argv: list[str] | None = None) -> None:
                 print("-" * 80)
 
     if do_print:
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        # Keep existing UX: print summary JSON to stdout
+        print(bundle.json_summary, end="")
 
 
 def main() -> None:

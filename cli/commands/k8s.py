@@ -17,7 +17,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     sp.add_parser("kind-up", help="Create kind cluster if missing")
     sp.add_parser("kind-down", help="Delete kind cluster")
     sp.add_parser("kind-ingress-up", help="Install ingress-nginx into kind")
-    sp.add_parser("kind-build-backend", help="Build backend image + load into kind")
+    sp.add_parser("kind-build-server", help="Build server image + load into kind")
 
     sp.add_parser("apply-local-generate-only", help="kubectl apply -k deploy/k8s/overlays/local-generate-only")
     sp.add_parser("delete-local-generate-only", help="kubectl delete -k deploy/k8s/overlays/local-generate-only")
@@ -72,12 +72,13 @@ def _handle(cfg: GlobalConfig, args: argparse.Namespace) -> int:
         )
         return 0
 
-    if c == "kind-build-backend":
+    if c == "kind-build-server":
+        dockerfile = cfg.repo_root / "deploy" / "docker" / "Dockerfile.server"
         run_bash(
             f'set -euo pipefail; '
-            f'docker build -t llm-backend:dev -f backend/Dockerfile.backend "{cfg.repo_root}"; '
-            f'kind load docker-image llm-backend:dev --name "{KIND_CLUSTER}"; '
-            f'echo "✅ loaded llm-backend:dev into kind"',
+            f'docker build -t llm-server:dev -f "{dockerfile}" "{cfg.repo_root}"; '
+            f'kind load docker-image llm-server:dev --name "{KIND_CLUSTER}"; '
+            f'echo "✅ loaded llm-server:dev into kind"',
             verbose=args.verbose,
         )
         return 0

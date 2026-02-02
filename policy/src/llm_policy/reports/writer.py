@@ -1,4 +1,4 @@
-# src/llm_policy/reports/writer.py
+# policy/src/llm_policy/reports/writer.py
 from __future__ import annotations
 
 import json
@@ -12,6 +12,10 @@ from llm_policy.types.decision import Decision
 def _to_mapping(x: Any) -> Mapping[str, Any]:
     """
     Normalize DecisionReason/DecisionWarning objects (pydantic) or dicts into a Mapping.
+
+    reports/ is HUMAN OUTPUT ONLY:
+      - text for terminals/logs
+      - markdown for docs/PR comments
     """
     if x is None:
         return {}
@@ -36,37 +40,34 @@ def _iter_issues(items: Optional[Iterable[Any]]) -> Iterable[Mapping[str, Any]]:
         yield _to_mapping(it)
 
 
-def render_decision_json(decision: Decision) -> str:
-    payload: Dict[str, Any] = decision.model_dump()  # pydantic v2
-    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
-
-
 def render_decision_text(decision: Decision) -> str:
+    """
+    Human-oriented single-decision summary for terminals.
+
+    NOTE: This is NOT the runtime ingestion artifact.
+    Runtime ingestion should use DecisionArtifactV1 (io/ or artifacts/).
+    """
     lines: list[str] = []
     lines.append(f"policy={decision.policy}")
 
-    # your Decision model has status; keep old ok=... line for back-compat UX
     if getattr(decision, "thresholds_profile", None):
         lines.append(f"thresholds_profile={decision.thresholds_profile}")
 
-    # Keep existing key name for compatibility with your earlier outputs
+    # keep legacy UX
     if getattr(decision, "enable_extract", None) is not None:
         lines.append(f"enable_extract={bool(decision.enable_extract)}")
 
-    # show status too (useful for tri-state)
     if getattr(decision, "status", None) is not None:
         lines.append(f"status={decision.status}")
 
     lines.append(f"ok={decision.ok() if hasattr(decision, 'ok') else 'unknown'}")
 
-    # Contract issues (if present)
     ce = int(getattr(decision, "contract_errors", 0) or 0)
     cw = int(getattr(decision, "contract_warnings", 0) or 0)
     if ce or cw:
         lines.append(f"contract_errors={ce}")
         lines.append(f"contract_warnings={cw}")
 
-    # Reasons
     reasons = list(_iter_issues(getattr(decision, "reasons", None)))
     if reasons:
         lines.append("")
@@ -76,7 +77,6 @@ def render_decision_text(decision: Decision) -> str:
             msg = r.get("message", "")
             lines.append(f"- {code}: {msg}")
 
-    # Warnings
     warnings = list(_iter_issues(getattr(decision, "warnings", None)))
     if warnings:
         lines.append("")
@@ -86,7 +86,6 @@ def render_decision_text(decision: Decision) -> str:
             msg = w.get("message", "")
             lines.append(f"- {code}: {msg}")
 
-    # Metrics (compact)
     metrics = getattr(decision, "metrics", None) or {}
     if metrics:
         lines.append("")
@@ -98,6 +97,11 @@ def render_decision_text(decision: Decision) -> str:
 
 
 def render_decision_md(decision: Decision) -> str:
+    """
+    Human-oriented markdown report for docs / PRs / GitHub comments.
+
+    NOTE: This is NOT the runtime ingestion artifact.
+    """
     lines: list[str] = []
     lines.append(f"# Policy Decision: `{decision.policy}`")
     lines.append("")

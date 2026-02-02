@@ -1,12 +1,15 @@
-# src/llm_policy/io/eval_artifacts.py
+# policy/src/llm_policy/io/eval_artifacts.py
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Optional
 
 from pydantic import ValidationError
+
+from llm_contracts.runtime.eval_run_pointer import read_eval_run_pointer
 
 from llm_policy.types.eval_artifact import (
     ContractIssue,
@@ -15,6 +18,46 @@ from llm_policy.types.eval_artifact import (
     EvalSummary,
     IssueSeverity,
 )
+
+# -----------------------------
+# Canonical eval "latest" pointer
+# -----------------------------
+
+
+def default_eval_latest_pointer_path() -> Path:
+    """
+    Canonical location for the "latest eval run" pointer.
+
+    Priority:
+      1) EVAL_LATEST_PATH (explicit override)
+      2) eval_out/latest.json (repo-relative)
+    """
+    env = os.getenv("EVAL_LATEST_PATH", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    return (Path("eval_out") / "latest.json").resolve()
+
+
+def resolve_eval_run_dir(run_dir: str | Path) -> Path:
+    """
+    Resolve a run_dir argument into an actual eval run directory.
+
+    Accepted values:
+      - explicit path to a run directory containing summary.json
+      - "latest" (or "." or "") => follow eval_out/latest.json pointer (llm_contracts)
+
+    Fail-closed behavior:
+      - if pointer is missing/invalid => returns a non-existent path, so downstream
+        loader emits contract issues and gating will deny.
+    """
+    s = str(run_dir).strip()
+    if s in ("", ".", "latest"):
+        ptr_path = default_eval_latest_pointer_path()
+        snap = read_eval_run_pointer(ptr_path)
+        if not snap.ok or not snap.run_dir:
+            return Path("__missing_eval_run_dir__")
+        return Path(snap.run_dir)
+    return Path(run_dir)
 
 
 # -----------------------------
@@ -33,6 +76,27 @@ class LoadResult:
     issues: list[ContractIssue]
 
 
+def load_eval_artifact(
+    run_dir: str | Path,
+    *,
+    load_results: bool = True,
+    max_results: Optional[int] = None,
+    allow_missing_results: bool = True,
+) -> EvalArtifact:
+    """
+    Back-compat helper (your CLI currently imports load_eval_artifact).
+
+    Returns only EvalArtifact (drops issues). If you want issues, use load_eval_run_dir().
+    """
+    res = load_eval_run_dir(
+        run_dir,
+        load_results=load_results,
+        max_results=max_results,
+        allow_missing_results=allow_missing_results,
+    )
+    return res.artifact
+
+
 def load_eval_run_dir(
     run_dir: str | Path,
     *,
@@ -45,12 +109,10 @@ def load_eval_run_dir(
       - summary.json (required)
       - results.jsonl (optional, depending on load_results / allow_missing_results)
 
-    This function is intentionally tolerant:
-      - summary.json must exist and parse as EvalSummary
-      - results.jsonl can be missing if allow_missing_results=True
-      - malformed jsonl lines are skipped with a ContractIssue
+    Enhancements vs previous version:
+      - supports run_dir="latest" (follows eval_out/latest.json pointer via llm_contracts)
     """
-    run_path = Path(run_dir)
+    run_path = resolve_eval_run_dir(run_dir)
     issues: list[ContractIssue] = []
 
     summary_path = run_path / "summary.json"

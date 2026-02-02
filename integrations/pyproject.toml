@@ -1,5 +1,5 @@
 [project]
-name = "llm_extraction_integrations"
+name = "llm_integrations"
 version = "0.1.0"
 requires-python = "==3.12.*"
 dependencies = [

@@ -1,3 +1,4 @@
+# policy/pyproject.toml
 [project]
 name = "llm_policy"
 version = "0.1.0"
@@ -16,6 +17,9 @@ dependencies = [
 
   # Convenience parsing / filesystem
   "python-dotenv>=1.0.0",
+
+  "jsonschema>=4.21,<5",
+  "llm-contracts @ file:../contracts",
 ]
 
 [project.scripts]

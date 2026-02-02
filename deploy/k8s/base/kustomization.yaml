@@ -13,8 +13,8 @@ resources:
 
   - migrations/job.yaml
 
-  - api/deployment.yaml
-  - api/service.yaml
+  - server/deployment.yaml
+  - server/service.yaml
 
   - ingress.yaml
 

@@ -16,4 +16,4 @@ generatorOptions:
   disableNameSuffixHash: true
 
 patchesStrategicMerge:
-  - api-patch.yaml
+  - server-patch.yaml

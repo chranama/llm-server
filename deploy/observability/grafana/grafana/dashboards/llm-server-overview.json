@@ -1,0 +1,188 @@
+{
+  "id": null,
+  "uid": "llm-server-overview",
+  "title": "LLM Server Overview",
+  "tags": ["llm", "server"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 3,
+  "refresh": "5s",
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Server Up",
+      "id": 1,
+      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "max(up{job=\"$job\"})",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "HTTP Request Rate (req/s)",
+      "id": 2,
+      "gridPos": { "x": 4, "y": 0, "w": 10, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (method, endpoint) (rate(http_requests_total{job=\"$job\"}[1m]))",
+          "legendFormat": "{{method}} {{endpoint}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "HTTP Latency p95 (seconds)",
+      "id": 3,
+      "gridPos": { "x": 14, "y": 0, "w": 10, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket{job=\"$job\"}[5m])))",
+          "legendFormat": "{{endpoint}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM Request Rate (req/s)",
+      "id": 4,
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (route, model_id) (rate(llm_requests_total{job=\"$job\"}[1m]))",
+          "legendFormat": "{{route}} [{{model_id}}]",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM Latency p95 (ms)",
+      "id": 5,
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, route, model_id) (rate(llm_request_latency_ms_bucket{job=\"$job\"}[5m])))",
+          "legendFormat": "{{route}} [{{model_id}}]",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM Token Throughput (tokens/s)",
+      "id": 6,
+      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (direction, model_id) (rate(llm_tokens_total{job=\"$job\"}[1m]))",
+          "legendFormat": "{{direction}} [{{model_id}}]",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Redis Cache Hits & Misses (rate)",
+      "id": 7,
+      "gridPos": { "x": 0, "y": 20, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (kind) (rate(llm_redis_hits_total{job=\"$job\"}[1m]))",
+          "legendFormat": "hits {{kind}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (kind) (rate(llm_redis_misses_total{job=\"$job\"}[1m]))",
+          "legendFormat": "misses {{kind}}",
+          "refId": "B"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Redis Hit Ratio",
+      "id": 8,
+      "gridPos": { "x": 8, "y": 20, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(llm_redis_hits_total{job=\"$job\"}[5m])) / (sum(rate(llm_redis_hits_total{job=\"$job\"}[5m])) + sum(rate(llm_redis_misses_total{job=\"$job\"}[5m])))",
+          "legendFormat": "hit_ratio",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Redis Latency p95 (seconds)",
+      "id": 9,
+      "gridPos": { "x": 16, "y": 20, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(llm_redis_latency_seconds_bucket{job=\"$job\"}[5m])))",
+          "legendFormat": "{{kind}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      }
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "job",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "Prometheus" },
+        "query": "label_values(up, job)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "regex": "llm_server_.*"
+      }
+    ]
+  }
+}

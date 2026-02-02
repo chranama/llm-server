@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
@@ -15,22 +14,16 @@ import cli.commands.k8s as k8s_cmd
 import cli.commands.policy as policy_cmd
 from cli.errors import CLIError, die
 from cli.types import GlobalConfig
-
-# backend is optional (you don't have cli/commands/backend.py yet)
-try:
-    import cli.commands.backend as backend_cmd  # type: ignore
-except Exception:  # pragma: no cover
-    backend_cmd = None
+from cli.util.paths import find_repo_root
 
 
 # -----------------------
-# Defaults (match justfile)
+# Defaults
 # -----------------------
 
 DEFAULT_ENV_FILE = ".env"
 DEFAULT_PROJECT_NAME = "llm-extraction-platform"
 DEFAULT_COMPOSE_YML = "deploy/compose/docker-compose.yml"
-DEFAULT_BACKEND_DIR = "backend"
 DEFAULT_TOOLS_DIR = "tools"
 DEFAULT_COMPOSE_DOCTOR = "tools/compose_doctor.sh"
 
@@ -48,31 +41,11 @@ DEFAULT_PG_USER = "llm"
 DEFAULT_PG_DB = "llm"
 
 
-def _find_repo_root(start: Path) -> Path:
-    """
-    Find repo root by walking upward until we see one of:
-      - deploy/compose/docker-compose.yml
-      - backend/pyproject.toml
-      - .git
-    Fallback: start directory.
-    """
-    cur = start.resolve()
-    for p in [cur, *cur.parents]:
-        if (p / DEFAULT_COMPOSE_YML).exists():
-            return p
-        if (p / "backend" / "pyproject.toml").exists():
-            return p
-        if (p / ".git").exists():
-            return p
-    return cur
-
-
 def _build_global_config(args: argparse.Namespace) -> GlobalConfig:
-    repo_root = _find_repo_root(Path.cwd())
+    repo_root = find_repo_root(Path.cwd(), compose_rel=DEFAULT_COMPOSE_YML)
 
     env_file = repo_root / (args.env_file or DEFAULT_ENV_FILE)
     compose_yml = repo_root / (args.compose_yml or DEFAULT_COMPOSE_YML)
-    backend_dir = repo_root / (args.backend_dir or DEFAULT_BACKEND_DIR)
     tools_dir = repo_root / (args.tools_dir or DEFAULT_TOOLS_DIR)
     compose_doctor = repo_root / (args.compose_doctor or DEFAULT_COMPOSE_DOCTOR)
 
@@ -84,7 +57,6 @@ def _build_global_config(args: argparse.Namespace) -> GlobalConfig:
         env_file=env_file,
         project_name=args.project_name or DEFAULT_PROJECT_NAME,
         compose_yml=compose_yml,
-        backend_dir=backend_dir,
         tools_dir=tools_dir,
         compose_doctor=compose_doctor,
         models_full=models_full,
@@ -103,14 +75,13 @@ def _build_global_config(args: argparse.Namespace) -> GlobalConfig:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="llmctl",
-        description="Root CLI to replace justfile: compose workflows, dev paths, eval, policy, and kind/k8s helpers.",
+        description="Root CLI: compose workflows, dev paths, eval, policy, and kind/k8s helpers.",
     )
 
     # Global options
     p.add_argument("--env-file", default=os.getenv("LLMCTL_ENV_FILE", DEFAULT_ENV_FILE))
     p.add_argument("--project-name", default=os.getenv("LLMCTL_PROJECT_NAME", DEFAULT_PROJECT_NAME))
     p.add_argument("--compose-yml", default=os.getenv("LLMCTL_COMPOSE_YML", DEFAULT_COMPOSE_YML))
-    p.add_argument("--backend-dir", default=os.getenv("LLMCTL_BACKEND_DIR", DEFAULT_BACKEND_DIR))
     p.add_argument("--tools-dir", default=os.getenv("LLMCTL_TOOLS_DIR", DEFAULT_TOOLS_DIR))
     p.add_argument("--compose-doctor", default=os.getenv("LLMCTL_COMPOSE_DOCTOR", DEFAULT_COMPOSE_DOCTOR))
 
@@ -141,10 +112,6 @@ def build_parser() -> argparse.ArgumentParser:
     eval_cmd.register(sub)
     policy_cmd.register(sub)
     k8s_cmd.register(sub)
-
-    # backend is optional until you add cli/commands/backend.py
-    if backend_cmd is not None:
-        backend_cmd.register(sub)
 
     return p
 
